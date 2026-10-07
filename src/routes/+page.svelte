@@ -43,7 +43,7 @@
 	<title>Moderaty | Comment Protection for YouTube Creators</title>
 	<meta
 		name="description"
-		content="Moderaty reads every YouTube comment so you never have to. Your rules plus AI enforce your norms around the clock, hold the borderline, log everything, and digest the themes your viewers keep raising. Free, open source."
+		content="Moderaty reads every YouTube comment so you never have to. Your rules plus AI enforce your norms around the clock, hold the borderline, log everything, and digest the themes your viewers keep raising. Source-available under PolyForm Shield, free to self-host."
 	/>
 	<meta property="og:type" content="website" />
 	<meta property="og:title" content="Never read another hate comment." />

@@ -54,6 +54,31 @@ describe('scheduled cron trigger', () => {
 		vi.useRealTimers();
 	});
 
+	it('keeps the original timeout while reading a stalled response body', async () => {
+		vi.useFakeTimers();
+		let streamController;
+		vi.stubGlobal('fetch', vi.fn(async (_endpoint, init) => {
+			await new Promise((resolve) => setTimeout(resolve, 24_000));
+			return new Response(new ReadableStream({
+				start(controller) {
+					streamController = controller;
+					init.signal.addEventListener('abort', () => controller.error(new DOMException('The operation was aborted', 'AbortError')));
+				}
+			}));
+		}));
+		let failure;
+		const promise = handler().catch((error) => { failure = error; });
+		try {
+			await vi.advanceTimersByTimeAsync(25_000);
+			expect(failure).toBeInstanceOf(Error);
+			expect(failure.message).toMatch(/abort/i);
+		} finally {
+			streamController.error(new DOMException('Test cleanup aborted the body', 'AbortError'));
+			await promise;
+			vi.useRealTimers();
+		}
+	});
+
 	it('bounds response bodies written to logs and errors', async () => {
 		const huge = (overrides) => ({ results: { channel: { note: 'x'.repeat(2000) } }, ...overrides });
 		vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(huge({ ok: true }))));
@@ -90,7 +115,7 @@ describe('scheduled cron trigger', () => {
 		}));
 
 		const error = await handler().catch((e) => e);
-		expect(error.message).toContain('fetch failed');
+		expect(error.message).toContain('dns');
 		expect(error.message).toContain('ENOTFOUND');
 	});
 
@@ -140,14 +165,21 @@ describe('scheduled cron trigger', () => {
 		await expect(handler()).rejects.toThrow(/invalid/);
 	});
 
-	it('suppresses a non-OK whose only failures are channel-owner categories', async () => {
+	it.each(['token', 'credits'])('suppresses a non-OK whose only failure is the owner category %s', async (category) => {
 		// Same contract as the local driver: 'credits'/'token' failures are
 		// dashboard-visible and self-resolving — an invocation failure every
 		// minute would be pure noise.
-		vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ ok: false, results: { UC1: { error: 'credits' } } }, 500)));
+		vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ ok: false, results: { UC1: { error: category } } }, 500)));
 		const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
 		await expect(handler()).resolves.toBeUndefined();
 		expect(warning).toHaveBeenCalled();
+	});
+
+	it.each(['token', 'credits'])('does not suppress a stale-preview cleanup failure behind %s errors', async (category) => {
+		const payload = { ok: false, feedbackPreviewSweepError: true, results: { UC1: { error: category } } };
+		vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(payload, 500)));
+
+		await expect(handler()).rejects.toThrow('feedbackPreviewSweepError');
 	});
 });

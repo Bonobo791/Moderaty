@@ -9,8 +9,8 @@
 			<h2 class="title">Never read another <span class="marker">hate comment.</span></h2>
 		</Reveal>
 		<Reveal delay={0.08}>
-			<a href={LOGIN_URL} class="btn-press cta">Connect YouTube channel</a>
-			<p class="microcopy">Google asks for standard YouTube access, used only on your comments. Free and open source (PolyForm Shield).</p>
+			<a href={LOGIN_URL} data-moderaty-event="connect_click" data-moderaty-placement="final_cta" class="btn-press cta">Connect YouTube channel</a>
+			<p class="microcopy">Google asks for standard YouTube access. Moderaty uses it for channel setup, comment moderation, and video titles and descriptions for context. Source-available under PolyForm Shield, free to self-host.</p>
 		</Reveal>
 	</div>
 </section>

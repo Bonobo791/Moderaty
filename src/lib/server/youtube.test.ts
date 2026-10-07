@@ -222,6 +222,26 @@ test('keeps a 500 moderation update failure generic', async () => {
 	expect(failure).toMatchObject({ message: 'setModerationStatus failed: 500 provider unavailable' });
 });
 
+test('a human mutation never retries a transport failure hidden behind a later success', async () => {
+	vi.useFakeTimers();
+	const fetch = vi.fn().mockRejectedValueOnce(new TypeError('connection lost')).mockResolvedValue(new Response(null, { status: 204 }));
+	vi.stubGlobal('fetch', fetch);
+	try {
+		const result = setModerationStatus(['comment'], 'rejected', false, 'token', undefined, true).catch((cause: unknown) => cause);
+		await vi.runAllTimersAsync();
+		expect(await result).toBeInstanceOf(Error);
+		expect(fetch).toHaveBeenCalledTimes(1);
+	} finally {
+		vi.useRealTimers();
+	}
+});
+
+test('a settled human write refusal is distinguished from an uncertain server failure', async () => {
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('forbidden', { status: 403 })));
+	const failure = await setModerationStatus(['comment'], 'rejected', false, 'token', undefined, true).catch((cause: unknown) => cause);
+	expect(failure).toMatchObject({ name: 'YoutubeWriteRefusedError' });
+});
+
 test('deletes a comment with a DELETE request and tolerates an already-deleted comment', async () => {
 	const fetch = vi.fn()
 		.mockResolvedValueOnce(new Response(null, { status: 204 }))

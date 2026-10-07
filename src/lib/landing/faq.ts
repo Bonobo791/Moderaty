@@ -7,7 +7,7 @@ export type FaqEntry = { q: string; a: string };
 export const FAQ_ENTRIES: FaqEntry[] = [
 	{
 		q: 'What is Moderaty?',
-		a: "Moderaty is comment protection for YouTube creators. It reads every new comment on every channel you connect, enforces your rules instantly, scores the rest with AI across 13 toxicity categories, and holds anything borderline for your one-click review. It's free and open source under the PolyForm Shield license."
+		a: "Moderaty is comment protection for YouTube creators. It reads every new comment on every channel you connect, enforces your rules instantly, scores the rest with AI across 13 toxicity categories, and holds anything borderline for your one-click review. It's source-available and free to self-host under the PolyForm Shield license."
 	},
 	{
 		q: 'Will Moderaty ban my real fans?',
@@ -35,11 +35,11 @@ export const FAQ_ENTRIES: FaqEntry[] = [
 	},
 	{
 		q: 'What YouTube account access does Moderaty need?',
-		a: 'Google\'s standard YouTube permission, the youtube.force-ssl scope; YouTube offers no comments-only permission. Moderaty uses it only to read and moderate comments on the channels you connect, to read your videos\' titles and descriptions as context for the AI\'s tone analysis, and, during setup, to list the channels your Google account owns (titles and IDs) so you can pick which one to connect. If you own several, that list is held briefly in an encrypted cookie while you choose, then discarded. Nothing else. The code is open source under PolyForm Shield, so you can verify exactly what it does with that access.'
+		a: 'Google\'s standard YouTube permission, the youtube.force-ssl scope; YouTube offers no comments-only permission. Moderaty uses it only to read and moderate comments on the channels you connect, to read your videos\' titles and descriptions as context for the AI\'s tone analysis, and, during setup, to list the channels your Google account owns (titles and IDs) so you can pick which one to connect. If you own several, that list is held briefly in an encrypted cookie while you choose, then discarded. Nothing else. The code is source-available under PolyForm Shield, so you can verify exactly what it does with that access.'
 	},
 	{
 		q: 'Is Moderaty really free?',
-		a: 'Self-hosted, yes: free and open source under the PolyForm Shield license, forever. If we host it for you, that is $5 a month with 100 comments included, or $49 once for lifetime if you are among the first 1,000 users.'
+		a: 'Self-hosted, yes: source-available and free to self-host under the PolyForm Shield license, forever. If we host it for you, that is $5 a month with 100 comments included, or $49 once for lifetime if you are among the first 1,000 users.'
 	},
 	{
 		q: 'How is Moderaty different from CommentShark or YouTube Studio?',

@@ -28,7 +28,7 @@
 		volume.
 	{/snippet}
 	{#snippet cta()}
-		<a href={LOGIN_URL} class="btn-press primary-btn">Connect YouTube channel</a>
+		<a href={LOGIN_URL} data-moderaty-event="connect_click" data-moderaty-placement="plan_hosted" class="btn-press primary-btn">Connect YouTube channel</a>
 		<p class="refund-note">Full refund within 7 days of purchase (CDC Art. 49).</p>
 	{/snippet}
 </PlanCard>

@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { parseDriverArgs, pingHealthcheck, scheduleTicks, tickOnce } from './dev-cron.mjs';
+import { cpSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { cronTransportError, formatTickFailure, parseDriverArgs, pingHealthcheck, scheduleTicks, tickOnce } from './dev-cron.mjs';
 
 // 'test-secret' is a synthetic credential fixture — maintainer-approved
 // documented exception per AGENTS.md (approved 2026-07-30, PR #13 review).
@@ -8,9 +13,24 @@ const ORIGINAL_ENV = {
 	CRON_SECRET: process.env.CRON_SECRET,
 	HEALTHCHECK_PING_URL: process.env.HEALTHCHECK_PING_URL
 };
+const pausedRecoveryPayload = { ok: true, results: {},
+	cronRunId: '11111111-1111-4111-8111-111111111111',
+	failureDiagnostics: [{ sweep: 'autoTopupSweepError', operation: 'auto_topup.paused_recovery', category: 'http', httpStatus: 500, provider: 'stripe', service: 'payments', message: 'test-secret' }] };
+const suppressedRecoveryPayload = { ...pausedRecoveryPayload, ok: false, results: { 'private-customer': { error: 'credits' } } };
 
 function cronResponse(payload, status = 200) {
 	return new Response(JSON.stringify(payload), { status });
+}
+
+function runFixtureTick(payload, status) {
+	const fixtureDirectory = mkdtempSync(join(tmpdir(), 'moderaty-cron-fixture-'));
+	try {
+		const fixturePath = join(fixtureDirectory, 'response.json');
+		writeFileSync(fixturePath, JSON.stringify({ payload, status }));
+		return spawnSync(process.execPath, ['--import', fileURLToPath(new URL('test-fixtures/cron-fetch.mjs', import.meta.url)), fileURLToPath(new URL('dev-cron.mjs', import.meta.url)), '--once'], {
+			encoding: 'utf8', env: { CRON_SECRET: 'test-secret', APP_URL: 'http://fixture.invalid', HEALTHCHECK_PING_URL: 'http://monitor.invalid', MODERATY_CRON_FIXTURE_PATH: fixturePath }
+		});
+	} finally { rmSync(fixtureDirectory, { recursive: true, force: true }); }
 }
 
 beforeEach(() => {
@@ -32,6 +52,180 @@ afterEach(() => {
 });
 
 describe('dev cron tick', () => {
+	it.each([
+		[{ ok: true, results: {} }, 200, 0, 2],
+		[pausedRecoveryPayload, 200, 0, 2],
+		[suppressedRecoveryPayload, 500, 0, 2],
+		[{ ok: false, results: { channel: { error: 'credits' } } }, 500, 0, 2],
+		[{ ok: false, results: {}, autoTopupSweepError: 'test-secret' }, 200, 1, 1],
+		[{ ok: false, results: { channel: { error: 'token' } }, autoTopupSweepError: 'test-secret' }, 500, 1, 1],
+		[{ ok: true }, 200, 1, 1]
+	])('--once keeps alert exit and health-ping behavior for fixture %j', (payload, status, exit, requests) => {
+		// The child has a complete fetch stub before loading the driver. No
+		// app, provider, monitor, database or mail transport is contacted.
+		const child = runFixtureTick(payload, status);
+		expect(child.status).toBe(exit);
+		expect(child.stderr).toContain(`fixture-requests=${requests}`);
+		expect(child.stderr + child.stdout).not.toContain('test-secret');
+		if (payload.failureDiagnostics) expect(child.stdout).toContain('auto_topup.paused_recovery');
+	});
+
+	it.each([
+		{ label: 'healthy', payload: pausedRecoveryPayload, status: 200 },
+		{ label: 'suppressed', payload: suppressedRecoveryPayload, status: 500 }
+	])('logs $label recovery diagnostics in both wrappers while retaining the alert verdict', async ({ payload, status }) => {
+		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload, status)));
+		const { default: netlifyCron } = await import('../netlify/functions/cron.mjs');
+		await expect(tickOnce()).resolves.toEqual(payload);
+		await expect(netlifyCron()).resolves.toBeUndefined();
+		expect(fetch).toHaveBeenCalledTimes(2);
+		expect(console.log).toHaveBeenCalledTimes(2);
+		const renderedDiagnostic = expect.stringMatching(/httpStatus=500.*operation=auto_topup\.paused_recovery/);
+		expect(console.log.mock.calls).toEqual([[renderedDiagnostic], [renderedDiagnostic]]);
+		const output = JSON.stringify(console.log.mock.calls);
+		expect(output).toContain(payload.cronRunId);
+		expect(output).not.toMatch(/test-secret|private-customer/);
+	});
+
+	it('rejects executable fixture status data before loading the driver', () => {
+		const child = runFixtureTick({ ok: true, results: {} }, '200, fixtureCode: console.error("fixture-code-executed")');
+		expect(child.status).toBe(1);
+		expect(child.stderr).toContain('Invalid cron fixture status');
+		expect(child.stderr).not.toContain('fixture-code-executed');
+		expect(child.stderr).not.toContain('fixture-requests=');
+	});
+
+	it.each([[204, 'non-JSON or invalid body'], [205, 'non-JSON or invalid body'], [304, 'answered 304']])('bodyless HTTP %s fixtures reach the driver and fail once without a health ping', (status, error) => {
+		const child = runFixtureTick({ ok: true, results: {} }, status);
+		expect(child.status).toBe(1);
+		expect(child.stderr).toContain('fixture-requests=1');
+		expect(child.stderr).toContain(error);
+		expect(child.stdout).toContain('tick →');
+		expect(child.stderr + child.stdout).not.toContain('test-secret');
+	});
+
+	it('keeps hostile payload strings as fixture data and preserves one failed tick', () => {
+		const hostile = '"` ${console.error("fixture-code-executed")}\r\n\u2028\u2029';
+		const child = runFixtureTick({ ok: false, results: {}, autoTopupSweepError: hostile }, 200);
+		expect(child.status).toBe(1);
+		expect(child.stderr).toContain('fixture-requests=1');
+		expect(child.stderr + child.stdout).not.toContain('fixture-code-executed');
+	});
+
+	it('flattens line separators at the failure formatter boundary', () => {
+		const summary = formatTickFailure(null, ['channel run failed:\r\nerror\u2028continued\u2029end']);
+		expect(summary).toBe('channel run failed:  error continued end');
+		expect(summary).not.toMatch(/[\r\n\u2028\u2029]/);
+	});
+
+	it.each([
+		{ ok: true, budgetExhausted: true, results: {} },
+		{ ok: true, results: { 'private-customer': { partial: true, stoppedReason: 'deadline' } } },
+		{ ok: false, results: {} }
+	])('correlates failures without individual diagnostics in both schedulers: %j', async (failure) => {
+		const cronRunId = '11111111-1111-4111-8111-111111111111';
+		const payload = { ...failure, cronRunId };
+		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload, failure.ok ? 200 : 500)));
+		const { default: netlifyCron } = await import('../netlify/functions/cron.mjs');
+		for (const run of [tickOnce, netlifyCron]) {
+			const error = await run().catch((cause) => cause);
+			expect(error).toBeInstanceOf(Error);
+			expect(error.message).toContain(`run=${cronRunId}`);
+			expect(error.message).not.toContain('private-customer');
+		}
+		expect(fetch).toHaveBeenCalledTimes(2);
+	});
+
+	it('bounds and sanitizes top-level run IDs without inventing a healthy failure', () => {
+		const cronRunId = '11111111-1111-4111-8111-111111111111';
+		const summary = formatTickFailure({ cronRunId }, Array(40).fill('x'.repeat(600)));
+		expect(summary).toContain(`run=${cronRunId}`);
+		expect(summary.length).toBeLessThanOrEqual(5500);
+		expect(summary).toContain('details truncated');
+		expect(formatTickFailure({ cronRunId: 'test-secret\r\n' }, ['budget exhausted'])).toBe('budget exhausted');
+		expect(formatTickFailure({ cronRunId }, [])).toBe('');
+		expect(cronTransportError(new Error('test-secret'), { status: '503 test-secret' }).message).not.toMatch(/HTTP|test-secret/);
+		expect(cronTransportError(new Error('test-secret'), { status: Object(503) }).message).not.toMatch(/HTTP|test-secret/);
+	});
+
+	it.each([200, 503])('distinguishes a failed HTTP %s body read from an unanswered endpoint', async (status) => {
+		const root = Object.assign(new Error('private URL test-secret'), { code: 'ECONNRESET' });
+		vi.stubGlobal('fetch', vi.fn(async () => new Response(new ReadableStream({ start(controller) { controller.error(root); } }), { status })));
+		const { default: netlifyCron } = await import('../netlify/functions/cron.mjs');
+		for (const run of [tickOnce, netlifyCron]) {
+			const error = await run().catch((cause) => cause);
+			expect(error.message).toContain('response body read failed');
+			expect(error.message).toContain(`HTTP ${status}`);
+			expect(error.message).toContain('operation=cron_response_body');
+			expect(error.message).toContain('ECONNRESET');
+			expect(error.message).not.toMatch(/unreachable|test-secret|private URL/);
+		}
+		expect(fetch).toHaveBeenCalledTimes(2);
+	});
+
+	it.each([200, 500])('retains provider HTTP status through both wrappers on HTTP %s', async (status) => {
+		const payload = { ok: false, results: {}, autoTopupSweepError: 'test-secret',
+			failureDiagnostics: [{ sweep: 'autoTopupSweepError', operation: 'auto_topup', category: 'http', httpStatus: 500, provider: 'stripe', service: 'payments' }] };
+		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload, status)));
+		const { default: netlifyCron } = await import('../netlify/functions/cron.mjs');
+		for (const run of [tickOnce, netlifyCron]) {
+			const error = await run().catch((e) => e);
+			expect(error.message).toContain('httpStatus=500');
+			expect(error.message).toContain('provider=stripe');
+			expect(error.message).not.toContain('test-secret');
+		}
+	});
+
+	it('loads in the Docker runtime layout without source files or runtime credentials', () => {
+		const runtime = mkdtempSync(join(tmpdir(), 'moderaty-cron-runtime-'));
+		try {
+			// Dockerfile ships scripts/ and package.json, but omits src/. Import
+			// only: the direct-execution guard must prevent any request or send.
+			cpSync(fileURLToPath(new URL('.', import.meta.url)), join(runtime, 'scripts'), { recursive: true });
+			writeFileSync(join(runtime, 'package.json'), '{"type":"module"}');
+			const probe = spawnSync(process.execPath, ['--input-type=module', '-e', 'globalThis.fetch = () => { throw new Error("Unexpected network request"); }; await import(process.argv[1]);', pathToFileURL(join(runtime, 'scripts/dev-cron.mjs')).href], { encoding: 'utf8', env: {} });
+			expect(probe.stderr).toBe('');
+			expect(probe.status).toBe(0);
+		} finally { rmSync(runtime, { recursive: true, force: true }); }
+	});
+
+	it.each([200, 500])('keeps root diagnostics in bounded, sanitized scheduler output on HTTP %s', async (status) => {
+		const payload = {
+			ok: false, results: { 'private-customer': { error: 'token' } },
+			noise: 'test-secret'.repeat(500), autoTopupSweepError: 'Failed query: private SQL params: test-secret',
+			cronRunId: '11111111-1111-4111-8111-111111111111',
+			failureDiagnostics: [{ sweep: 'autoTopupSweepError', operation: 'auto_topup.lifetime_candidates',
+				category: 'dns', code: 'EAI_AGAIN', syscall: 'getaddrinfo', provider: 'turso', service: 'database',
+				cronRunId: '11111111-1111-4111-8111-111111111111', message: 'test-secret', headers: { authorization: 'test-secret' } }]
+		};
+		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload, status)));
+		const { default: netlifyCron } = await import('../netlify/functions/cron.mjs');
+		for (const run of [tickOnce, netlifyCron]) {
+			const error = await run().catch((e) => e);
+			expect(error).toBeInstanceOf(Error);
+			expect(error.message).toContain('EAI_AGAIN');
+			expect(error.message).toContain('getaddrinfo');
+			expect(error.message).toContain('auto_topup.lifetime_candidates');
+			expect(error.message).toContain(payload.cronRunId);
+			expect(error.message.length).toBeLessThan(6000);
+			for (const forbidden of ['test-secret', 'private-customer', 'private SQL', 'authorization']) expect(error.message).not.toContain(forbidden);
+		}
+		const output = console.log.mock.calls.flat().join(' ');
+		expect(output).toContain('EAI_AGAIN');
+		expect(output).not.toContain('test-secret');
+		expect(output).not.toContain('private-customer');
+	});
+
+	it('sanitizes nested transport failures without replaying the cron request', async () => {
+		const root = Object.assign(new Error('https://user:test-secret@private-host.invalid/'), { code: 'EAI_AGAIN', syscall: 'getaddrinfo' });
+		const fetchImpl = vi.fn().mockRejectedValue(new TypeError('fetch failed test-secret', { cause: root }));
+		const error = await tickOnce(fetchImpl).catch((e) => e);
+		expect(error.message).toContain('EAI_AGAIN');
+		expect(error.message).not.toContain('test-secret');
+		expect(error.message).not.toContain('private-host');
+		expect(fetchImpl).toHaveBeenCalledTimes(1);
+	});
+
 	it('fails loudly when CRON_SECRET is missing', async () => {
 		delete process.env.CRON_SECRET;
 		vi.stubGlobal('fetch', vi.fn());
@@ -95,7 +289,8 @@ describe('dev cron tick', () => {
 		const thrown = await tickOnce().catch((e) => e);
 		expect(thrown).toBeInstanceOf(Error);
 		expect(thrown.message).not.toMatch(/[\r\n]/);
-		expect(thrown.message).toContain('sweep blew up');
+		expect(thrown.message).toContain('sweepError');
+		expect(thrown.message).not.toContain('sweep blew up');
 	});
 
 	it('does not fail the tick when every channel failure is owner-actionable', async () => {
@@ -116,20 +311,47 @@ describe('dev cron tick', () => {
 		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload, 500)));
 
 		await expect(tickOnce()).resolves.toEqual(payload);
+		const rendered = JSON.parse(console.log.mock.calls[0][0].split('tick → ')[1]);
+		expect(rendered.problems).toBeUndefined();
 	});
 
-	it('still throws when a suppressed category shares the tick with an ops failure', async () => {
-		const payload = { ok: false, results: { UC1: { error: 'token' }, UC2: { error: 'quota' } } };
-		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload, 500)));
-
-		await expect(tickOnce()).rejects.toThrow('500');
-	});
-
-	it('throws on a 500 whose only channel error is an ops category', async () => {
-		const payload = { ok: false, results: { UC1: { error: 'scoring' } } };
-		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload, 500)));
-
-		await expect(tickOnce()).rejects.toThrow('scoring');
+	// Every operator problem must retain its existing exit verdict, including
+	// a problem sharing a 500 with otherwise suppressible owner categories.
+	it.each([
+		{ label: 'owner category plus operator quota error', status: 500, expected: '500',
+			payload: { ok: false, results: { UC1: { error: 'token' }, UC2: { error: 'quota' } } } },
+		{ label: 'operator scoring error', status: 500, expected: 'scoring',
+			payload: { ok: false, results: { UC1: { error: 'scoring' } } } },
+		{ label: 'partial run at deadline', status: 200, expected: 'timed out',
+			payload: { ok: true, results: { UC1: { fetched: 2, acted: 1, partial: true, stoppedReason: 'deadline' } } } },
+		{ label: 'retention sweep failure', status: 200, expected: 'sweepError: failure (no safe diagnostic)',
+			payload: { ok: false, sweepError: 'retention sweep blew up', results: {} } },
+		{ label: 'zero-credit sweep failure alongside owner error', status: 500, expected: 'zeroCreditSweepError',
+			payload: { ok: false, results: { UC1: { error: 'token' } }, zeroCreditSweepError: 'sweep blew up' } },
+		{ label: 'named zero-credit sweep failure', status: 200, expected: 'zeroCreditSweepError: failure (no safe diagnostic)',
+			payload: { ok: false, zeroCreditSweepError: 'db down', results: {} } },
+		{ label: 'digest failure alongside owner error', status: 500, expected: 'digest',
+			payload: { ok: false, results: { UC1: { error: 'token' } }, digest: { error: 'error' } } },
+		{ label: 'sweeps spent the run budget', status: 200, expected: 'budget',
+			payload: { ok: true, budgetExhausted: true, results: {} } },
+		{ label: 'lost run-health bookkeeping', status: 200, expected: 'bookkeeping',
+			payload: { ok: true, bookkeepingError: true, results: { UC1: { fetched: 1 } } } },
+		{ label: 'per-account zero-credit errors on an otherwise healthy tick', status: 200, expected: 'zeroCreditItemErrors',
+			payload: { ok: true, zeroCreditItemErrors: 2, results: {} } },
+		{ label: 'per-account zero-credit errors alongside owner error', status: 500, expected: 'zeroCreditItemErrors',
+			payload: { ok: false, zeroCreditItemErrors: 1, results: { UC1: { error: 'credits' } } } },
+		{ label: 'preview cleanup failure alongside token error', status: 500, expected: 'feedbackPreviewSweepError',
+			payload: { ok: false, feedbackPreviewSweepError: true, results: { UC1: { error: 'token' } } } },
+		{ label: 'preview cleanup failure alongside credits error', status: 500, expected: 'feedbackPreviewSweepError',
+			payload: { ok: false, feedbackPreviewSweepError: true, results: { UC1: { error: 'credits' } } } },
+		{ label: 'Stripe scrub failure alongside token error', status: 500, expected: 'stripeScrubSweepError',
+			payload: { ok: false, results: { UC1: { error: 'token' } }, stripeScrubSweepError: 'scrub failed' } },
+		{ label: 'Stripe scrub failure alongside credits error', status: 500, expected: 'stripeScrubSweepError',
+			payload: { ok: false, results: { UC1: { error: 'credits' } }, stripeScrubSweepError: 'scrub failed' } }
+	])('fails on $label', async ({ payload, status, expected }) => {
+		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload, status)));
+		const { default: netlifyCron } = await import('../netlify/functions/cron.mjs');
+		for (const run of [tickOnce, netlifyCron]) await expect(run()).rejects.toThrow(expected);
 	});
 
 	it('an out-of-credits channel result on a 200 is a healthy tick', async () => {
@@ -139,54 +361,11 @@ describe('dev cron tick', () => {
 		await expect(tickOnce()).resolves.toEqual(payload);
 	});
 
-	it('fails the tick when a channel run ended partial on the tick deadline', async () => {
-		// codex: a partial deadline return rides the 200 payload — classifying
-		// only `entry.error` let a moderation run that never finished read as
-		// a healthy tick to the dead-man ping.
-		const payload = { ok: true, results: { UC1: { fetched: 2, acted: 1, partial: true, stoppedReason: 'deadline' } } };
-		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload)));
-
-		await expect(tickOnce()).rejects.toThrow('timed out');
-	});
-
 	it('does not fail the tick for a channel paused mid-run — deactivation is owner-actionable', async () => {
 		const payload = { ok: true, results: { UC1: { partial: true, stoppedReason: 'deactivated' } } };
 		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload)));
 
 		await expect(tickOnce()).resolves.toEqual(payload);
-	});
-
-	it('fails the tick when a sweep failed — the payload field is otherwise invisible to the scheduler', async () => {
-		const payload = { ok: false, sweepError: 'retention sweep blew up', results: {} };
-		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload)));
-
-		await expect(tickOnce()).rejects.toThrow('sweepError: retention sweep blew up');
-	});
-
-	it('does not suppress a zero-credit sweep failure behind owner-actionable channel errors', async () => {
-		// A 500 whose channel errors are all owner-actionable is normally
-		// silenced — but a failed retention sweep rides the same payload and
-		// must still trip the operator alert.
-		const payload = { ok: false, results: { UC1: { error: 'token' } }, zeroCreditSweepError: 'sweep blew up' };
-		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload, 500)));
-
-		await expect(tickOnce()).rejects.toThrow('zeroCreditSweepError');
-	});
-
-	it('names the zero-credit sweep failure on a 200 instead of the generic ok:false', async () => {
-		const payload = { ok: false, zeroCreditSweepError: 'db down', results: {} };
-		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload)));
-
-		await expect(tickOnce()).rejects.toThrow('zeroCreditSweepError: db down');
-	});
-
-	it.each(['token', 'credits'])('does not suppress Stripe scrub failures behind %s errors in either scheduler', async (category) => {
-		const payload = { ok: false, results: { UC1: { error: category } }, stripeScrubSweepError: 'scrub failed' };
-		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload, 500)));
-		const { default: netlifyCron } = await import('../netlify/functions/cron.mjs');
-
-		await expect(tickOnce()).rejects.toThrow('stripeScrubSweepError');
-		await expect(netlifyCron()).rejects.toThrow('stripeScrubSweepError');
 	});
 
 	it.each(['dryRunWindow', 'digest', 'feedbackPreview'])('fails the tick when the %s job reports an error on a 200', async (field) => {
@@ -199,13 +378,6 @@ describe('dev cron tick', () => {
 		await expect(tickOnce()).rejects.toThrow(field);
 	});
 
-	it('does not suppress an aux-job failure behind an owner-actionable channel error', async () => {
-		const payload = { ok: false, results: { UC1: { error: 'token' } }, digest: { error: 'error' } };
-		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload, 500)));
-
-		await expect(tickOnce()).rejects.toThrow('digest');
-	});
-
 	it('treats successful aux-job results as healthy', async () => {
 		const payload = { ok: true, results: { UC1: { fetched: 3 } }, dryRunWindow: { fetched: 5, windowComplete: true }, digest: { generated: true } };
 		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload)));
@@ -213,36 +385,6 @@ describe('dev cron tick', () => {
 		await expect(tickOnce()).resolves.toEqual(payload);
 	});
 
-	it('fails the tick when sweeps consumed the whole run budget', async () => {
-		const payload = { ok: true, budgetExhausted: true, results: {} };
-		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload)));
-
-		await expect(tickOnce()).rejects.toThrow('budget');
-	});
-
-	it('fails the tick when the run-health bookkeeping write was lost', async () => {
-		const payload = { ok: true, bookkeepingError: true, results: { UC1: { fetched: 1 } } };
-		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload)));
-
-		await expect(tickOnce()).rejects.toThrow('bookkeeping');
-	});
-
-	it('fails the tick when per-account zero-credit evaluations failed — the count is the only alert channel', async () => {
-		// `ok` stays true for per-item sweep errors by design, so a user whose
-		// evaluation throws every rotation would retry silently forever
-		// without this check (codeant).
-		const payload = { ok: true, zeroCreditItemErrors: 2, results: {} };
-		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload)));
-
-		await expect(tickOnce()).rejects.toThrow('zeroCreditItemErrors');
-	});
-
-	it('does not suppress zero-credit item failures behind owner-actionable channel errors on a 500', async () => {
-		const payload = { ok: false, zeroCreditItemErrors: 1, results: { UC1: { error: 'credits' } } };
-		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload, 500)));
-
-		await expect(tickOnce()).rejects.toThrow('zeroCreditItemErrors');
-	});
 });
 
 describe('driver args', () => {
@@ -329,14 +471,36 @@ describe('healthcheck ping', () => {
 
 		fetch.mockRejectedValueOnce(new Error('dns failure'));
 		await expect(pingHealthcheck()).resolves.toBeUndefined();
-		expect(console.error).toHaveBeenCalledWith('healthcheck ping failed:', 'dns failure');
+		expect(console.error).toHaveBeenCalledWith('healthcheck ping failed:', expect.stringContaining('operation=healthcheck_ping'));
+		expect(console.error.mock.calls.flat().join(' ')).not.toContain('dns failure');
 	});
 });
-
 
 describe('contact delivery health', () => {
 	it.each([{ contactNotificationErrors: 1 }, { contactNotificationSweepError: 'database unavailable' }])('alerts operators on contact failures even alongside an owner-actionable channel failure (%j)', async (contactFailure) => {
 		vi.stubGlobal('fetch', vi.fn(async () => cronResponse({ ok: false, results: { UC1: { error: 'token' } }, ...contactFailure }, 500)));
 		await expect(tickOnce()).rejects.toThrow(/contactNotification/);
 	});
+});
+
+describe.each(['driver', 'netlify'])('%s welcome delivery health', wrapper => {
+ const invoke = async () => wrapper === 'driver' ? tickOnce() : (await import('../netlify/functions/cron.mjs')).default();
+ it.each([
+  [{ welcomeEmailSweepError: 'database unavailable' }, 'welcomeEmailSweepError: failure (no safe diagnostic)'],
+  [{ welcomeEmailErrors: 1 }, 'welcomeEmailErrors: 1 delivery attempt(s) failed'],
+  [{ welcomeEmailEnrollmentErrors: 1 }, 'welcomeEmailEnrollmentErrors: 1 account enrollment(s) failed'],
+  [{ welcomeEmailAmbiguous: 1 }, 'welcomeEmailAmbiguous: reconciliation required']
+ ])('names the actionable welcome problem in a 200 response (%j)', async (failure, expected) => {
+  vi.stubGlobal('fetch', vi.fn(async () => cronResponse({ ok: false, results: {}, ...failure })));
+  await expect(invoke()).rejects.toThrow(expected);
+ });
+ it('does not suppress welcome failures behind an owner-actionable channel error', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => cronResponse({ ok: false, results: { UC1: { error: 'token' } }, welcomeEmailErrors: 1 }, 500)));
+  await expect(invoke()).rejects.toThrow(/welcomeEmailErrors/);
+ });
+ it('zero welcome counters remain healthy', async () => {
+  const payload = { ok: true, results: {}, welcomeEmailEnrollmentErrors: 0, welcomeEmailErrors: 0, welcomeEmailAmbiguous: 0 };
+  vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload)));
+  await expect(invoke()).resolves.toEqual(wrapper === 'driver' ? payload : undefined);
+ });
 });

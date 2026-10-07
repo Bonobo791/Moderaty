@@ -53,8 +53,8 @@
 				<h3 class="step-title">Doubt is always yours to decide.</h3>
 				<p class="step-body">
 					Borderline comments wait in your review queue: one click to approve, reject, delete, or
-					ban. Every action is written to the audit log before it happens on YouTube, so nothing
-					disappears without a trace and a crash mid-run never repeats an action. Each channel gets 1 free moderation dry run and 1 free feedback dry run. Neither spends credits. Moderation previews drain the selected window in the background; feedback previews cover the first page, up to 100 comments.
+					ban. Moderation intent is saved before changes reach YouTube, and completed actions
+					appear in your audit log. Interrupted actions are retried safely. Each channel gets 1 free moderation dry run and 1 free feedback dry run. Neither spends credits. Moderation previews drain the selected window in the background; feedback previews cover the first page, up to 100 comments.
 				</p>
 			</div>
 			{@render terminal('audit.log', audit)}
@@ -82,7 +82,7 @@
 	<div><span class="t-dim">03:12:31</span> <span class="t-ban">DELETED</span> <span class="t-mid">@CryptoKingdom42</span> <span class="t-arrow">rule: keyword</span></div>
 	<div><span class="t-dim">03:14:02</span> <span class="t-amber">HELD</span> <span class="t-mid">@UmAckchyually</span> <span class="t-arrow">score 0.68, queued</span></div>
 	<div><span class="t-dim">03:14:55</span> <span class="t-mint">APPROVED</span> <span class="t-mid">@bia_souza</span> <span class="t-arrow">score 0.02</span></div>
-	<div class="t-note">logged before it happens. reversible, always.</div>
+	<div class="t-note">Held and rejected comments can be restored. Deletions are permanent; author bans cannot be lifted in Moderaty.</div>
 {/snippet}
 
 <style>

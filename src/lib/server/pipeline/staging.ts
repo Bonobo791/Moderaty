@@ -4,6 +4,7 @@ import { commentChargeRef, consumeCreditsBulk, type LedgerHandle } from '$lib/se
 import { db } from '$lib/server/db';
 import { auditLog, comments, moderationActions } from '$lib/server/db/schema';
 import { assertChannelActive, type ChannelIdentity } from './enforcement';
+import { hasHumanClaim } from './human-claims';
 import type { Decision, RescanCharge } from './types';
 
 /**
@@ -240,51 +241,79 @@ async function chargeBillableDecisions(
 
 /** Optional staging knobs: org to bill, channel identity for the liveness
  * assert, and rescan mode (upserts + scan-scoped charge anchors). */
-export type StageOptions = { orgId?: string | null; expected?: ChannelIdentity; rescan?: RescanCharge };
+export type StageOptions = { orgId?: string | null; expected?: ChannelIdentity; rescan?: RescanCharge; protectedIds?: string[] };
+
+async function preserveRescanHumanClaims(transaction: LedgerHandle, channelId: string, decisions: Decision[], scanStamp?: string | null, protectedIds: string[] = []): Promise<Decision[]> {
+	const candidateIds = [...new Set([...decisions.map(decision => decision.comment.id), ...protectedIds])];
+	if (!candidateIds.length) return decisions;
+	const existing = await transaction.select({ id: comments.id, status: comments.status, humanDispatchToken: comments.humanDispatchToken, humanDispatchState: comments.humanDispatchState })
+		.from(comments).where(and(eq(comments.channelId, channelId), inArray(comments.id, candidateIds))).all();
+	const reserved = existing.filter(hasHumanClaim).map(row => row.id);
+	if (!reserved.length) return decisions;
+	// The restoring claim owns intent before token refresh and reservation.
+	// Record this scan's visit without changing that pending/active/uncertain
+	// decision, its action rows, audit history, or credit balance.
+	await transaction.update(comments).set({ scanId: scanStamp ?? null })
+		.where(and(eq(comments.channelId, channelId), inArray(comments.id, reserved)));
+	const reservedIds = new Set(reserved);
+	console.warn('staging: preserved %d pending or reserved human decisions during history rescan', reserved.length);
+	return decisions.filter(decision => !reservedIds.has(decision.comment.id));
+}
+
+type DecisionCounts = { acted: number; queued: number; stagedCount: number };
+function decisionCounts(decisions: Decision[]): DecisionCounts {
+	return {
+		acted: decisions.filter(decision => decision.youtubeAction).length,
+		queued: decisions.filter(decision => decision.auditAction === 'queue').length,
+		stagedCount: decisions.length
+	};
+}
 
 export async function stageDecisions(channelId: string, decisions: Decision[], options: StageOptions = {}) {
-	if (!decisions.length) return;
-	const actions = actionRows(channelId, decisions);
-	await db.transaction(async (transaction) => {
+	if (!decisions.length && !(options.rescan && options.protectedIds?.length)) return decisionCounts(decisions);
+	return await db.transaction(async (transaction) => {
 		// The channel check and all staging writes share one transaction. Account
 		// deletion either commits first (and this fails) or waits until these rows
 		// are complete; no orphaned rows can be created between a preflight read
 		// and the inserts.
 		await assertChannelActive(channelId, transaction, options.expected);
 		const handle = transaction as LedgerHandle;
+		const committedDecisions = options.rescan
+			? await preserveRescanHumanClaims(handle, channelId, decisions, options.rescan.scanStamp, options.protectedIds) : decisions;
+		if (!committedDecisions.length) return decisionCounts(committedDecisions);
 		if (options.rescan) {
-			await upsertRescannedCommentRows(handle, channelId, decisions, options.rescan.scanStamp);
+			await upsertRescannedCommentRows(handle, channelId, committedDecisions, options.rescan.scanStamp);
 		} else {
-			await transaction.insert(comments).values(commentRows(channelId, decisions));
+			await transaction.insert(comments).values(commentRows(channelId, committedDecisions));
 		}
-		await stageActionRows(handle, decisions, actions, options.rescan !== undefined);
+		await stageActionRows(handle, committedDecisions, actionRows(channelId, committedDecisions), options.rescan !== undefined);
 		// Enforcement decisions (ban/reject/delete/hold) get their audit row at
 		// completion from completeActions — EXCEPT a queued comment's 'queue'
 		// row, which records WHY it waits for a human even though its 'hold'
 		// row is written later by enforcement.
 		const audits = auditRows(
 			channelId,
-			decisions.filter((decision) => !decision.youtubeAction || decision.auditAction === 'queue'),
+			committedDecisions.filter((decision) => !decision.youtubeAction || decision.auditAction === 'queue'),
 			false
 		);
 		if (audits.length) await transaction.insert(auditLog).values(audits);
-		await chargeBillableDecisions(handle, options.orgId, decisions, options.rescan?.chargeScope);
+		await chargeBillableDecisions(handle, options.orgId, committedDecisions, options.rescan?.chargeScope);
+		return decisionCounts(committedDecisions);
 	});
 }
 
 
 /**
  * Stages decisions (live) or writes the audit trail (dry run) once the
- * channel is confirmed still active. Returns the acted count.
+ * channel is confirmed still active. Returns counts from the committed batch.
  */
 export async function stageOrAuditDecisions(
 	channelId: string,
 	decisions: Decision[],
 	dryRun: boolean,
 	options: StageOptions = {}
-): Promise<number> {
+): Promise<DecisionCounts> {
 	if (dryRun) {
-		const acted = decisions.filter((decision) => decision.youtubeAction).length;
 		const audits = auditRows(channelId, decisions, true);
 		if (audits.length) {
 			await db.transaction(async (transaction) => {
@@ -292,8 +321,7 @@ export async function stageOrAuditDecisions(
 				await transaction.insert(auditLog).values(audits);
 			});
 		}
-		return acted;
+		return decisionCounts(decisions);
 	}
-	await stageDecisions(channelId, decisions, options);
-	return decisions.filter((decision) => decision.youtubeAction).length;
+	return await stageDecisions(channelId, decisions, options);
 }

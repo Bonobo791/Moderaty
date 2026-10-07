@@ -2,7 +2,7 @@ import { format } from 'node:util';
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { auditLog, channelAllowedHandles, channels, comments, creditTransactions, moderationActions, organizations, rules } from '$lib/server/db/schema';
-import { CommentNotFoundError } from '../youtube';
+import { CommentNotFoundError, YoutubeWriteRefusedError } from '../youtube';
 import {
 	dispatchedAction,
 	expectActionState,
@@ -138,7 +138,7 @@ test('a cancelling reject re-publishes a rescan-approved comment before supersed
 
 	await runChannel('channel');
 
-	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'published', false, 'access-token', undefined);
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'published', false, 'access-token', undefined, true);
 	expectActionState('superseded');
 });
 
@@ -151,7 +151,7 @@ test('a cancelling hold re-publishes a rescan-approved comment before supersedin
 
 	// The dispatched hold may have landed remotely: publish restores the
 	// comment the rescan approved, then the row can go terminal.
-	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'published', false, 'access-token', undefined);
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'published', false, 'access-token', undefined, true);
 	expectActionState('superseded');
 });
 
@@ -169,7 +169,7 @@ test('a missing publish target converges the comment to deleted — never left a
 
 	await runChannel('channel');
 
-	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'published', false, 'access-token', undefined);
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'published', false, 'access-token', undefined, true);
 	expect(mocks.state.commentStatuses.comment).toBe('deleted');
 	expectActionState('superseded');
 	expect(warning).toHaveBeenCalledWith('comment comment no longer exists on YouTube — completing approve');
@@ -195,11 +195,11 @@ test('a missing publish target leaves a mid-flight human claim owned by its own 
 	expectActionState('cancelling');
 });
 
-test('a failed convergence write keeps a cancelling hold retryable', async () => {
+test('a settled convergence refusal keeps a cancelling hold retryable', async () => {
 	mocks.state.existingIds = ['comment'];
 	mocks.state.commentStatuses = { comment: 'approved' };
 	mocks.state.moderationActions = [dispatchedAction({ action: 'hold', state: 'cancelling' })];
-	mocks.setModerationStatus.mockRejectedValueOnce(new Error('socket hang up'));
+	mocks.setModerationStatus.mockRejectedValueOnce(new YoutubeWriteRefusedError('forbidden'));
 	const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
 	await runChannel('channel');
@@ -209,7 +209,7 @@ test('a failed convergence write keeps a cancelling hold retryable', async () =>
 
 	await runChannel('channel');
 
-	expect(mocks.setModerationStatus).toHaveBeenLastCalledWith(['comment'], 'published', false, 'access-token', undefined);
+	expect(mocks.setModerationStatus).toHaveBeenLastCalledWith(['comment'], 'published', false, 'access-token', undefined, true);
 	expectActionState('superseded');
 });
 
@@ -248,12 +248,12 @@ test('a human approval landing while a hold write is in flight is re-applied aft
 	// longer reorder a decided comment's remote state (codex).
 	expect(mocks.setModerationStatus.mock.calls).toEqual([
 		[['comment'], 'heldForReview', false, 'access-token', undefined],
-		[['comment'], 'published', false, 'access-token', undefined]
+		[['comment'], 'published', false, 'access-token', undefined, true]
 	]);
 	expectActionState('cancelling');
 
 	await runChannel('channel');
-	expect(mocks.setModerationStatus).toHaveBeenLastCalledWith(['comment'], 'published', false, 'access-token', undefined);
+	expect(mocks.setModerationStatus).toHaveBeenLastCalledWith(['comment'], 'published', false, 'access-token', undefined, true);
 	expectActionState('superseded');
 });
 
@@ -264,8 +264,8 @@ test('a dispatched hold superseded by a decided comment publishes it back instea
 
 	await runChannel('channel');
 
-	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'published', false, 'access-token', undefined);
-	expect(mocks.setModerationStatus).not.toHaveBeenCalledWith(['comment'], 'heldForReview', false, 'access-token', undefined);
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'published', false, 'access-token', undefined, true);
+	expect(mocks.setModerationStatus).not.toHaveBeenCalledWith(['comment'], 'heldForReview', false, 'access-token', undefined, true);
 	expectActionState('superseded');
 });
 
@@ -278,22 +278,23 @@ test('a hold on a restoring comment is not converged — the human flow and the 
 	mocks.state.existingIds = ['comment'];
 	mocks.state.commentStatuses = { comment: 'restoring' };
 	mocks.state.moderationActions = [dispatchedAction({ action: 'hold' })];
+	mocks.state.commentRestoreIntentIds = { comment: 1 };
 	mocks.state.insertedAudits = [
-		{ channelId: 'channel', commentId: 'comment', action: 'reject', reason: 'queue UI', actor: 'user', createdAt: '2026-01-04T00:00:01.000Z' }
+		{ id: 1, channelId: 'channel', commentId: 'comment', action: 'reject', reason: 'queue UI', actor: 'user', createdAt: '2026-01-04T00:00:01.000Z' }
 	];
 
 	await runChannel('channel');
 
 	// The recorded intent replays; the raced hold stays outstanding — its
 	// write may land after the human's reject, so 'completed' would lie.
-	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'rejected', false, 'access-token', undefined);
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'rejected', false, 'access-token', undefined, true);
 	expectActionState('cancelling');
 	expect(mocks.state.insertedAudits).not.toContainEqual(expect.objectContaining({ commentId: 'comment', action: 'hold', actor: 'system' }));
 
 	// Next sweep: the corrective reject re-asserts the decided state and the
 	// row goes terminal — remote truth converges to 'rejected'.
 	await runChannel('channel');
-	expect(mocks.setModerationStatus).toHaveBeenLastCalledWith(['comment'], 'rejected', false, 'access-token', undefined);
+	expect(mocks.setModerationStatus).toHaveBeenLastCalledWith(['comment'], 'rejected', false, 'access-token', undefined, true);
 	expectActionState('superseded');
 });
 
@@ -321,8 +322,9 @@ test('a dispatched reject on a restoring comment stays reconcilable — the corr
 	mocks.state.existingIds = ['comment'];
 	mocks.state.commentStatuses = { comment: 'restoring' };
 	mocks.state.moderationActions = [dispatchedAction({ action: 'reject' })];
+	mocks.state.commentRestoreIntentIds = { comment: 1 };
 	mocks.state.insertedAudits = [
-		{ channelId: 'channel', commentId: 'comment', action: 'restore', reason: 'undo', actor: 'user', createdAt: '2026-01-04T00:00:01.000Z' }
+		{ id: 1, channelId: 'channel', commentId: 'comment', action: 'restore', reason: 'undo', actor: 'user', createdAt: '2026-01-04T00:00:01.000Z' }
 	];
 
 	await runChannel('channel');
@@ -330,8 +332,8 @@ test('a dispatched reject on a restoring comment stays reconcilable — the corr
 	// 'restore' publishes and finalizes 'approved'; the raced reject is
 	// kept outstanding, never completed over an unproven ordering — and the
 	// stale reject intent never touches YouTube again (converge publishes).
-	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'published', false, 'access-token', undefined);
-	expect(mocks.setModerationStatus).not.toHaveBeenCalledWith(['comment'], 'rejected', false, 'access-token', undefined);
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'published', false, 'access-token', undefined, true);
+	expect(mocks.setModerationStatus).not.toHaveBeenCalledWith(['comment'], 'rejected', false, 'access-token', undefined, true);
 	expectActionState('cancelling');
 	expect(mocks.state.commentStatuses.comment).toBe('approved');
 	expect(mocks.state.insertedAudits).not.toContainEqual(expect.objectContaining({ commentId: 'comment', action: 'reject', actor: 'system' }));
@@ -339,8 +341,8 @@ test('a dispatched reject on a restoring comment stays reconcilable — the corr
 	// Next sweep: the corrective publish re-asserts the approved state — it
 	// lands after any late-landing reject — then the row goes terminal.
 	await runChannel('channel');
-	expect(mocks.setModerationStatus).toHaveBeenLastCalledWith(['comment'], 'published', false, 'access-token', undefined);
-	expect(mocks.setModerationStatus).not.toHaveBeenCalledWith(['comment'], 'rejected', false, 'access-token', undefined);
+	expect(mocks.setModerationStatus).toHaveBeenLastCalledWith(['comment'], 'published', false, 'access-token', undefined, true);
+	expect(mocks.setModerationStatus).not.toHaveBeenCalledWith(['comment'], 'rejected', false, 'access-token', undefined, true);
 	expectActionState('superseded');
 });
 
@@ -362,7 +364,7 @@ test('a reject write resolving after a rescan re-approval stays reconcilable', a
 	expectActionState('cancelling');
 
 	await runChannel('channel');
-	expect(mocks.setModerationStatus).toHaveBeenLastCalledWith(['comment'], 'published', false, 'access-token', undefined);
+	expect(mocks.setModerationStatus).toHaveBeenLastCalledWith(['comment'], 'published', false, 'access-token', undefined, true);
 	expectActionState('superseded');
 });
 
@@ -372,13 +374,14 @@ test('a dispatched action AGREEING with the human outcome completes at finalize'
 	mocks.state.existingIds = ['comment'];
 	mocks.state.commentStatuses = { comment: 'restoring' };
 	mocks.state.moderationActions = [dispatchedAction({ action: 'reject' })];
+	mocks.state.commentRestoreIntentIds = { comment: 1 };
 	mocks.state.insertedAudits = [
-		{ channelId: 'channel', commentId: 'comment', action: 'reject', reason: 'queue UI', actor: 'user', createdAt: '2026-01-04T00:00:01.000Z' }
+		{ id: 1, channelId: 'channel', commentId: 'comment', action: 'reject', reason: 'queue UI', actor: 'user', createdAt: '2026-01-04T00:00:01.000Z' }
 	];
 
 	await runChannel('channel');
 
-	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'rejected', false, 'access-token', undefined);
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'rejected', false, 'access-token', undefined, true);
 	expect(mocks.state.commentStatuses.comment).toBe('rejected');
 	expectActionState('completed');
 	expect(mocks.state.insertedAudits).toContainEqual(expect.objectContaining({ commentId: 'comment', action: 'reject', actor: 'system' }));
@@ -399,7 +402,7 @@ test('a comment claimed mid-convergence keeps its cancelling action outstanding'
 
 	await runChannel('channel');
 
-	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'rejected', false, 'access-token', undefined);
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'rejected', false, 'access-token', undefined, true);
 	expectActionState('cancelling');
 });
 
@@ -409,8 +412,9 @@ test('a rescan replacing the restoring claim keeps its freshly staged action', a
 	// mid-write would still see its fresh pending action superseded.
 	mocks.state.existingIds = ['comment'];
 	mocks.state.commentStatuses = { comment: 'restoring' };
+	mocks.state.commentRestoreIntentIds = { comment: 1 };
 	mocks.state.insertedAudits = [
-		{ channelId: 'channel', commentId: 'comment', action: 'reject', reason: 'queue UI', actor: 'user', createdAt: '2026-01-04T00:00:01.000Z' }
+		{ id: 1, channelId: 'channel', commentId: 'comment', action: 'reject', reason: 'queue UI', actor: 'user', createdAt: '2026-01-04T00:00:01.000Z' }
 	];
 	mocks.setModerationStatus.mockImplementationOnce(async () => {
 		// The rescan stages a fresh verdict + action while the human's remote
@@ -435,8 +439,9 @@ test.each([
 ] as const)('a completed replacement %s for a %s comment reconciles after a late human publish', async (action, status, remoteOutcome) => {
 	mocks.state.existingIds = ['comment'];
 	mocks.state.commentStatuses = { comment: 'restoring' };
+	mocks.state.commentRestoreIntentIds = { comment: 1 };
 	mocks.state.insertedAudits = [
-		{ channelId: 'channel', commentId: 'comment', action: 'restore', reason: 'log UI', actor: 'user', createdAt: '2026-01-04T00:00:01.000Z' }
+		{ id: 1, channelId: 'channel', commentId: 'comment', action: 'restore', reason: 'log UI', actor: 'user', createdAt: '2026-01-04T00:00:01.000Z' }
 	];
 	let remoteStatus = 'rejected';
 	mocks.setModerationStatus.mockImplementation(async (_ids, moderationStatus) => {
@@ -466,8 +471,9 @@ test.each([
 test('a completed replacement already agreeing with the landed human write stays completed', async () => {
 	mocks.state.existingIds = ['comment'];
 	mocks.state.commentStatuses = { comment: 'restoring' };
+	mocks.state.commentRestoreIntentIds = { comment: 1 };
 	mocks.state.insertedAudits = [
-		{ channelId: 'channel', commentId: 'comment', action: 'reject', reason: 'queue UI', actor: 'user', createdAt: '2026-01-04T00:00:01.000Z' }
+		{ id: 1, channelId: 'channel', commentId: 'comment', action: 'reject', reason: 'queue UI', actor: 'user', createdAt: '2026-01-04T00:00:01.000Z' }
 	];
 	mocks.setModerationStatus.mockImplementationOnce(async () => {
 		mocks.state.commentStatuses.comment = 'rejected';
@@ -752,7 +758,7 @@ test.each([
 
 	if (published) {
 		expect(mocks.setModerationStatus).toHaveBeenCalledTimes(1);
-		expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'published', false, 'access-token', undefined);
+		expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'published', false, 'access-token', undefined, true);
 	} else {
 		expectNoYoutubeWrites();
 	}
@@ -805,31 +811,31 @@ test('a crashed human action is re-executed and finalized by the reconcile sweep
 	// (I3) and crashed before finishing: the next run must finish exactly the
 	// recorded intent and land the final status — not leave it dangling.
 	mocks.state.insertedComments = [
-		{ id: 'comment', channelId: 'channel', text: 'x', publishedAt: '2026-01-01T00:00:00Z', status: 'restoring', decidedBy: 'human' }
+		{ id: 'comment', channelId: 'channel', text: 'x', publishedAt: '2026-01-01T00:00:00Z', status: 'restoring', decidedBy: 'human', restoreIntentId: 1 }
 	];
 	mocks.fetchNewComments.mockResolvedValue({ comments: [], nextPageToken: null, reachedCursor: true });
 	mocks.state.insertedAudits = [
-		{ channelId: 'channel', commentId: 'comment', action: 'reject', reason: 'manual review', actor: 'user', createdAt: '2026-01-01T00:00:00Z' }
+		{ id: 1, channelId: 'channel', commentId: 'comment', action: 'reject', reason: 'manual review', actor: 'user', createdAt: '2026-01-01T00:00:00Z' }
 	];
 
 	await runChannel('channel');
 
-	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'rejected', false, 'access-token', undefined);
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'rejected', false, 'access-token', undefined, true);
 	expect(mocks.state.insertedComments[0].status).toBe('rejected');
 });
 
 test('a crashed approve intent is republished and finalized by the reconcile sweep', async () => {
 	mocks.state.insertedComments = [
-		{ id: 'comment', channelId: 'channel', text: 'x', publishedAt: '2026-01-01T00:00:00Z', status: 'restoring', decidedBy: 'human' }
+		{ id: 'comment', channelId: 'channel', text: 'x', publishedAt: '2026-01-01T00:00:00Z', status: 'restoring', decidedBy: 'human', restoreIntentId: 1 }
 	];
 	mocks.fetchNewComments.mockResolvedValue({ comments: [], nextPageToken: null, reachedCursor: true });
 	mocks.state.insertedAudits = [
-		{ channelId: 'channel', commentId: 'comment', action: 'approve', reason: 'manual review', actor: 'user', createdAt: '2026-01-01T00:00:00Z' }
+		{ id: 1, channelId: 'channel', commentId: 'comment', action: 'approve', reason: 'manual review', actor: 'user', createdAt: '2026-01-01T00:00:00Z' }
 	];
 
 	await runChannel('channel');
 
-	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'published', false, 'access-token', undefined);
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'published', false, 'access-token', undefined, true);
 	expect(mocks.state.insertedComments[0].status).toBe('approved');
 });
 
@@ -838,25 +844,24 @@ test('a missing comment during a crashed intent warns and finalizes the real out
 	// reject. Finalizing 'rejected' would record a remote state that does not
 	// exist; the comment is gone, so the honest terminal status is 'deleted'.
 	mocks.state.insertedComments = [
-		{ id: 'comment', channelId: 'channel', text: 'x', publishedAt: '2026-01-01T00:00:00Z', status: 'restoring', decidedBy: 'human' }
+		{ id: 'comment', channelId: 'channel', text: 'x', publishedAt: '2026-01-01T00:00:00Z', status: 'restoring', decidedBy: 'human', restoreIntentId: 1 }
 	];
 	mocks.fetchNewComments.mockResolvedValue({ comments: [], nextPageToken: null, reachedCursor: true });
 	mocks.state.insertedAudits = [
-		{ channelId: 'channel', commentId: 'comment', action: 'reject', reason: 'manual review', actor: 'user', createdAt: '2026-01-01T00:00:00Z' }
+		{ id: 1, channelId: 'channel', commentId: 'comment', action: 'reject', reason: 'manual review', actor: 'user', createdAt: '2026-01-01T00:00:00Z' }
 	];
 	const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
 	mocks.setModerationStatus.mockRejectedValueOnce(new CommentNotFoundError(['comment']));
 
 	await runChannel('channel');
 
-	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'rejected', false, 'access-token', undefined);
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'rejected', false, 'access-token', undefined, true);
 	expect(warning).toHaveBeenCalledWith('comment comment no longer exists on YouTube — completing reject');
 	expect(mocks.state.insertedComments[0].status).toBe('deleted');
 });
 
 test('the reconcile sweep ignores a restoring comment without a user intent audit', async () => {
-	// 'restoring' rows a human never claimed (or whose latest audit is a
-	// system action) are not ours to finish.
+	// 'restoring' rows with only system audits have no human intent to finish.
 	mocks.state.insertedComments = [
 		{ id: 'comment', channelId: 'channel', text: 'x', publishedAt: '2026-01-01T00:00:00Z', status: 'restoring', decidedBy: 'human' }
 	];

@@ -88,14 +88,23 @@ function boundaryCounts(credits: number, size: number): number[] {
  * counts of the large size are candidates, with the small size covering the
  * remainder — O(1) regardless of `credits`.
  */
-export function purchasableCreditCostUsd(credits: number): number {
-	if (credits <= 0) return 0;
-	let best = Number.POSITIVE_INFINITY;
+export function purchasableCreditEstimate(credits: number): { costUsd: number; credits: number } {
+	if (credits <= 0) return { costUsd: 0, credits: 0 };
+	let bestCents = Number.POSITIVE_INFINITY;
+	let purchasedCredits = 0;
 	for (const big of boundaryCounts(credits, BUNDLE_SIZES[0])) {
 		const rest = Math.max(0, credits - big * BUNDLE_SIZES[0]);
 		const mid = Math.ceil(rest / BUNDLE_SIZES[1]);
 		const cents = big * expectedBundlePriceCents(BUNDLE_SIZES[0]) + mid * expectedBundlePriceCents(BUNDLE_SIZES[1]);
-		if (cents < best) best = cents;
+		if (cents < bestCents) {
+			bestCents = cents;
+			purchasedCredits = big * BUNDLE_SIZES[0] + mid * BUNDLE_SIZES[1];
+		}
 	}
-	return best / 100;
+	return { costUsd: bestCents / 100, credits: purchasedCredits };
+}
+
+/** Return the cheapest manual-bundle purchase cost for the requested credits. */
+export function purchasableCreditCostUsd(credits: number): number {
+	return purchasableCreditEstimate(credits).costUsd;
 }

@@ -29,13 +29,13 @@
 	<title>Pricing | Moderaty</title>
 	<meta
 		name="description"
-		content="Free and open source when self-hosted (PolyForm Shield, bring your own key). Hosted: $5 a month for 100 AI-scored comments, auto-renewed, top-ups in bundles of 500 or 2,000 comments. First 1,000 users: $49 once for lifetime hosting, scoring on your own OpenAI key."
+		content="Free to self-host under PolyForm Shield; source-available, bring your own key. Hosted: $5 a month for 100 AI classifications shared by moderation scoring and feedback digests, auto-renewed, top-ups in bundles of 500 or 2,000 credits. First 1,000 users: $49 once for lifetime hosting, scoring on your own OpenAI key."
 	/>
 	<meta property="og:type" content="website" />
 	<meta property="og:title" content="Protection, priced like a utility." />
 	<meta
 		property="og:description"
-		content="Free and open source when self-hosted. Hosted: $5 a month for 100 comments, or $49 once for lifetime hosting (first 1,000 users, your own OpenAI key)."
+		content="Source-available under PolyForm Shield, free to self-host. Hosted: $5 a month for 100 AI classifications shared by moderation scoring and feedback digests, or $49 once for lifetime hosting (first 1,000 users, your own OpenAI key)."
 	/>
 	{@html jsonLd(faqPage)}
 </svelte:head>

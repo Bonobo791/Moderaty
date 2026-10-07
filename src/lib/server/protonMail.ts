@@ -47,6 +47,21 @@ class SendGuardExpiredError extends Error {}
 /** Configuration-only diagnostics are fixed strings safe for server logs. */
 export class ProtonMailConfigurationError extends Error {}
 
+/** Scheduling failure proven to occur before sendMail is invoked. */
+export class ProtonMailPreSubmissionDeadlineError extends DeadlineExceededError {
+	readonly outcome = 'retryable';
+	readonly category = 'deadline_before_submission';
+}
+
+/** Safe, machine-readable SMTP outcome; never contains a provider reply or recipient. */
+export class ProtonMailSubmissionError extends Error {
+	constructor(
+		public readonly outcome: 'retryable' | 'permanent' | 'unknown',
+		public readonly category: string,
+		message: string
+	) { super(message); }
+}
+
 export interface ProtonMailConfig {
 	username: string;
 	token: string;
@@ -134,7 +149,7 @@ function validatedMessageId(info: unknown, toEmail: string): string {
 	if (rejected.length > 0) {
 		// Stryker disable next-line StringLiteral: log-only message — mutating it changes no observable behavior
 		console.error('proton mail send failed: server rejected the recipient');
-		throw new Error('e-mail could not be sent (recipient rejected)');
+		throw new ProtonMailSubmissionError('permanent', 'recipient_rejected', 'e-mail could not be sent (recipient rejected)');
 	}
 	const accepted = Array.isArray(verdict.accepted) ? verdict.accepted : [];
 	const soleRecipient =
@@ -143,14 +158,21 @@ function validatedMessageId(info: unknown, toEmail: string): string {
 	if (!soleRecipient || !/^250[\s-]/.test(finalResponse)) {
 		// Stryker disable next-line StringLiteral: log-only message — mutating it changes no observable behavior
 		console.error('proton mail send failed: malformed acceptance (recipient or DATA verdict missing)');
-		throw new Error('e-mail could not be sent (malformed acceptance)');
+		throw new ProtonMailSubmissionError('unknown', 'malformed_acceptance', 'e-mail could not be sent (malformed acceptance)');
 	}
 	if (typeof verdict.messageId !== 'string' || verdict.messageId.length === 0) {
 		// Stryker disable next-line StringLiteral: log-only message — mutating it changes no observable behavior
 		console.error('proton mail send failed: acceptance carried no message id');
-		throw new Error('e-mail could not be sent (malformed acceptance)');
+		throw new ProtonMailSubmissionError('unknown', 'malformed_acceptance', 'e-mail could not be sent (malformed acceptance)');
 	}
 	return verdict.messageId;
+}
+
+/** An explicit negative SMTP response proves non-acceptance, including DATA. */
+function smtpRejection(responseCode: number | undefined): ProtonMailSubmissionError | null {
+	if (responseCode === undefined || !Number.isFinite(responseCode) || responseCode < 400) return null;
+	if (responseCode < 500) return new ProtonMailSubmissionError('retryable', 'throttled', 'e-mail could not be sent (provider throttled the request)');
+	return new ProtonMailSubmissionError('permanent', 'rejected', 'e-mail could not be sent (provider rejected the request)');
 }
 
 /**
@@ -165,19 +187,25 @@ function smtpFailure(error: unknown): Error {
 	const command = typeof detail.command === 'string' ? detail.command : undefined;
 	// Stryker disable next-line StringLiteral: log-only message — mutating it changes no observable behavior
 	console.error('proton mail send failed:', JSON.stringify({ code, responseCode, command }));
-	if (code === 'EAUTH') return new Error('e-mail could not be sent (authentication failure)');
-	if (code === 'ETIMEDOUT' || code === 'ESOCKETTIMEOUT') return new Error('e-mail could not be sent (send timed out)');
-	if (code === 'EENVELOPE') return new Error('e-mail could not be sent (recipient rejected)');
+	const failure = (outcome: 'retryable' | 'permanent' | 'unknown', category: string, message: string) =>
+		new ProtonMailSubmissionError(outcome, category, `e-mail could not be sent (${message})`);
+	if (code === 'EAUTH') return failure('retryable', 'authentication', 'authentication failure');
+	if (code === 'ETIMEDOUT' || code === 'ESOCKETTIMEOUT') return failure('unknown', 'timeout', 'send timed out');
+	// MAIL FROM is configured deployment identity; only RCPT TO failures
+	// concern the recipient. A sender rejection must pause the campaign.
+	if (code === 'EENVELOPE' && command?.toUpperCase() === 'MAIL FROM') return failure('retryable', 'sender_rejected', 'sender rejected');
+	if (code === 'EENVELOPE') return failure(responseCode !== undefined && responseCode < 500 ? 'retryable' : 'permanent', 'recipient_rejected', 'recipient rejected');
 	if (code !== undefined && /CERT|TLS|SSL|ALTNAME|SELF_SIGNED|UNABLE_TO/i.test(code)) {
-		return new Error('e-mail could not be sent (TLS failure)');
+		return failure('retryable', 'tls', 'TLS failure');
 	}
-	if (responseCode !== undefined && responseCode >= 400 && responseCode < 500) {
-		return new Error('e-mail could not be sent (provider throttled the request)');
-	}
-	if (responseCode !== undefined && responseCode >= 500) {
-		return new Error('e-mail could not be sent (provider rejected the request)');
-	}
-	return new Error('e-mail could not be sent (SMTP failure)');
+	const rejection = smtpRejection(responseCode);
+	if (rejection) return rejection;
+	if (code === 'EDNS') return failure('retryable', 'dns', 'SMTP failure');
+	// Nodemailer reports CONN for socket closes after DATA too: it is NOT
+	// proof of a pre-submission failure. Only known pre-submission phases
+	// are safe to retry. Missing phase information may mean DATA was accepted.
+	const beforeSubmission = command !== undefined && /^(EHLO|HELO|STARTTLS|AUTH(?: .*)?|MAIL FROM|RCPT TO)$/i.test(command);
+	return failure(beforeSubmission ? 'retryable' : 'unknown', 'smtp', 'SMTP failure');
 }
 
 /**
@@ -196,6 +224,7 @@ function smtpFailure(error: unknown): Error {
  * @returns The provider-accepted message id.
  */
 export async function sendProtonMailEmail(message: ProtonMailMessage, deadline?: number): Promise<ProtonMailSendResult> {
+	if (deadline !== undefined && Date.now() >= deadline) throw new ProtonMailPreSubmissionDeadlineError();
 	const config = loadProtonMailConfig();
 	validateMessage(message);
 	// The caller's run budget composes with (never widens) the 10s client
@@ -203,7 +232,7 @@ export async function sendProtonMailEmail(message: ProtonMailMessage, deadline?:
 	// defers instead of counting a provider failure (http.ts convention).
 	const timeoutMs =
 		deadline === undefined ? PROTON_TIMEOUT_MS : Math.min(PROTON_TIMEOUT_MS, deadline - Date.now());
-	if (timeoutMs <= 0) throw new DeadlineExceededError();
+	if (timeoutMs <= 0) throw new ProtonMailPreSubmissionDeadlineError();
 
 	// Per-send transport — no pooling (MOD-116). secure:false + requireTLS
 	// means STARTTLS is mandatory: the send fails rather than authenticating
@@ -239,7 +268,7 @@ export async function sendProtonMailEmail(message: ProtonMailMessage, deadline?:
 	if (deadline !== undefined && Date.now() >= deadline) {
 		smtpSocket.destroy();
 		transport.close();
-		throw new DeadlineExceededError();
+		throw new ProtonMailPreSubmissionDeadlineError();
 	}
 
 	let timer: ReturnType<typeof setTimeout> | undefined;
@@ -292,7 +321,7 @@ export async function sendProtonMailEmail(message: ProtonMailMessage, deadline?:
 		if (error instanceof SendGuardExpiredError) {
 			// Stryker disable next-line StringLiteral: log-only message — mutating it changes no observable behavior
 			console.error('proton mail send failed: operation timed out');
-			throw new Error('e-mail could not be sent (send timed out)');
+			throw new ProtonMailSubmissionError('unknown', 'timeout', 'e-mail could not be sent (send timed out)');
 		}
 		throw smtpFailure(error);
 	} finally {

@@ -1,37 +1,47 @@
 <!--
-	The math.txt terminal: turns YouTube Studio's comment count into a
-	budget. Same bracketed-terminal idiom as HowItWorks.
+	The hosted monthly purchase estimator. Same terminal idiom as HowItWorks.
 -->
 
 <script lang="ts">
 	import { page } from '$app/state';
 	import Reveal from '../Reveal.svelte';
-	import { forecastMonths, hostedCostUsd, MAX_CALCULATOR_COMMENTS } from '$lib/landing/cost';
+	import { estimateHostedMonth, forecastMonths, MAX_CALCULATOR_COMMENTS, MONTHLY_PLAN_USD, validCountInput } from '$lib/landing/cost';
 
-	let monthOne = $state<number | undefined>(undefined);
-	let monthTwo = $state<number | undefined>(undefined);
-	let monthThree = $state<number | undefined>(undefined);
+	let moderationCount = $state<number | null | undefined>(undefined);
+	let digestCount = $state<number | null | undefined>(0);
+	let monthOne = $state<number | null | undefined>(undefined);
+	let monthTwo = $state<number | null | undefined>(undefined);
+	let monthThree = $state<number | null | undefined>(undefined);
 	const locale = $derived(page.data.locale ?? 'en');
-	const validCount = (value: number | undefined) => value === undefined || (Number.isSafeInteger(value) && value >= 0 && value <= MAX_CALCULATOR_COMMENTS);
-	const validInputs = $derived(validCount(monthOne) && validCount(monthTwo) && validCount(monthThree));
+	const validInputs = $derived(validCountInput(monthOne) && validCountInput(monthTwo) && validCountInput(monthThree));
 	// The forecast needs ALL THREE months — a blank input is not a 0, so a
 	// partially filled form shows nothing instead of an instant low estimate.
 	const forecast = $derived(validInputs ? forecastMonths([monthOne, monthTwo, monthThree]) : null);
-	const lastMonthCost = $derived(monthOne === undefined ? null : validCount(monthOne) ? hostedCostUsd(monthOne) : null);
+	const monthEstimate = $derived(
+		moderationCount != null && digestCount != null && validCountInput(moderationCount) && validCountInput(digestCount)
+			? estimateHostedMonth(moderationCount, digestCount)
+			: null
+	);
+	const invalidMonth = $derived(!validCountInput(moderationCount) || !validCountInput(digestCount));
 	const formatUsd = (value: number) => new Intl.NumberFormat(locale === 'pt-BR' ? 'pt-BR' : 'en-US', { style: 'currency', currency: 'USD' }).format(value);
-	const hasInput = $derived(monthOne !== undefined || monthTwo !== undefined || monthThree !== undefined);
-	const label = $derived(locale === 'pt-BR' ? 'comentários' : 'comments');
+	const hasInput = $derived(monthOne != null || monthTwo != null || monthThree != null);
+	const label = $derived(locale === 'pt-BR' ? 'classificações de IA' : 'AI classifications');
 </script>
 
 <section class="section">
 	<Reveal class="math-grid">
 		<div>
-			<h2 class="section-title">What would your month cost?</h2>
+			<h2 class="section-title">Estimate your hosted month</h2>
 			<p class="section-body">
-				Open YouTube Studio and check last month's comment count. The first 100 are the $5
-				subscription. Past that, top-ups start at a nickel a comment and get cheaper at
-				volume — topped up manually or automatically, your call. If last month rounds to
-				zero, the free tier is waving at you.
+				The hosted subscription renews at $5 a month, even with no AI classifications.
+				You get 100 credits shared by AI moderation scoring and feedback digests.
+				One moderation score uses one credit; a digest classification uses another.
+			</p>
+			<p class="section-body">
+				Count AI scoring work, including requested history rescans, rather than raw YouTube
+				comment volume. Rule and protected-handle moderation decisions use no credit;
+				digest classification of those comments still uses one. Retries of the same scan
+				do not add another charge.
 			</p>
 		</div>
 		<div class="brackets terminal">
@@ -40,29 +50,46 @@
 					<span class="terminal-label">math.txt</span>
 				</div>
 				<div class="terminal-body">
-					<div><span class="t-dim">comments last month</span> <span class="t-lit">see YouTube Studio</span></div>
-					<div><span class="t-dim">covered by the plan</span> <span class="t-lit">first 100 ($5/mo)</span></div>
-					<div><span class="t-dim">top-up beyond that</span> <span class="t-lit">bundles of 500 / 2,000 — $20.40 / $64.65</span></div>
-					<div><span class="t-dim">nights reading hate</span> <span class="t-mint">0</span></div>
+					<div><span class="t-dim">monthly subscription</span> <span class="t-lit">$5, including zero usage</span></div>
+					<div><span class="t-dim">shared allowance</span> <span class="t-lit">100 AI classifications</span></div>
+					<div><span class="t-dim">top-up bundles</span> <span class="t-lit">500 / 2,000 credits: $20.40 / $64.65</span></div>
 					<div class="t-note">$5/mo renews. automatic top-up is opt-in.</div>
 				</div>
 			</div>
 		</div>
 		<div class="calculator-grid" aria-label={locale === 'pt-BR' ? 'Calculadoras de custo' : 'Cost calculators'}>
+			<p class="calculator-assumptions">
+				Assumes zero purchased credits and the full unused 100-credit allowance for a paid month.
+				Assumes both published bundles are available.
+				Shows the cheapest manual bundle combination covering your usage. Purchased leftovers
+				stay on your balance, so later purchases can be lower. Automatic top-up depends on your
+				chosen bundle and threshold; this is an estimate, not a bill.
+			</p>
 			<div class="calculator">
 				<h3>{locale === 'pt-BR' ? 'Calcule seu mês' : 'Calculate your month'}</h3>
-				<p class="calculator-copy">{locale === 'pt-BR' ? 'Informe o volume de comentários do mês passado.' : 'Enter last month’s comment volume.'}</p>
-				<label for="last-month-comments">{locale === 'pt-BR' ? 'Comentários no último mês' : 'Comments last month'}</label>
-				<input id="last-month-comments" type="number" min="0" max={MAX_CALCULATOR_COMMENTS} step="1" bind:value={monthOne} placeholder="0" />
-				{#if lastMonthCost === null}
+				<p class="calculator-copy">{locale === 'pt-BR' ? 'Informe as classificações de moderação e dos resumos separadamente.' : 'Enter moderation scores and digest classifications separately.'}</p>
+				<label for="last-month-comments">{locale === 'pt-BR' ? 'Classificações de moderação com IA' : 'AI moderation scores'}</label>
+				<input id="last-month-comments" type="number" min="0" max={MAX_CALCULATOR_COMMENTS} step="1" bind:value={moderationCount} placeholder="0" />
+				<label for="digest-classifications">{locale === 'pt-BR' ? 'Classificações dos resumos com IA' : 'Feedback digest classifications'}</label>
+				<input id="digest-classifications" type="number" min="0" max={MAX_CALCULATOR_COMMENTS} step="1" bind:value={digestCount} aria-describedby="digest-assumption" />
+				<p id="digest-assumption" class="calculator-copy">Use 0 with digests off. Otherwise enter the number you expect to classify; cadence, backlog and requested history scans affect it. Digest counts can exceed moderation scores.</p>
+				{#if invalidMonth}
 					<p class="input-error" role="alert">{locale === 'pt-BR' ? 'Informe um número inteiro válido.' : 'Enter a valid whole number.'}</p>
-				{:else}
-					<strong>{formatUsd(lastMonthCost)} <span>/ {locale === 'pt-BR' ? 'mês' : 'month'}</span></strong>
+				{:else if monthEstimate}
+					<strong aria-live="polite">{formatUsd(monthEstimate.cashCostUsd)} <span>{locale === 'pt-BR' ? 'total mensal estimado' : 'estimated monthly total'}</span></strong>
+					<dl class="estimate-breakdown">
+						<div><dt>Subscription</dt><dd>{formatUsd(MONTHLY_PLAN_USD)}</dd></div>
+						<div><dt>AI classifications</dt><dd>{monthEstimate.classifications.toLocaleString(locale)}</dd></div>
+						<div><dt>Included used</dt><dd>{monthEstimate.includedUsed.toLocaleString(locale)} / 100</dd></div>
+						<div><dt>Purchased credits used</dt><dd>{monthEstimate.purchasedUsed.toLocaleString(locale)}</dd></div>
+						<div><dt>Top-up purchase</dt><dd>{monthEstimate.topupCredits.toLocaleString(locale)} credits ({formatUsd(monthEstimate.topupCostUsd)})</dd></div>
+						<div><dt>Purchased credits left</dt><dd>{monthEstimate.remainingPurchasedCredits.toLocaleString(locale)}</dd></div>
+					</dl>
 				{/if}
 			</div>
 			<div class="calculator">
 				<h3>{locale === 'pt-BR' ? 'Projete uma faixa' : 'Forecast a range'}</h3>
-				<p class="calculator-copy">{locale === 'pt-BR' ? 'Use os últimos três meses para uma faixa simples.' : 'Use the last three months for a simple range.'}</p>
+				<p class="calculator-copy">{locale === 'pt-BR' ? 'Some moderação e resumos em cada mês.' : 'Enter total AI classifications (moderation + digests) for each month.'}</p>
 				<div class="month-inputs">
 					<label for="month-one">{locale === 'pt-BR' ? 'Mês 1' : 'Month 1'}<input id="month-one" type="number" min="0" max={MAX_CALCULATOR_COMMENTS} step="1" bind:value={monthOne} /></label>
 					<label for="month-two">{locale === 'pt-BR' ? 'Mês 2' : 'Month 2'}<input id="month-two" type="number" min="0" max={MAX_CALCULATOR_COMMENTS} step="1" bind:value={monthTwo} /></label>
@@ -73,7 +100,13 @@
 				{:else if hasInput && !validInputs}
 					<p class="input-error" role="alert">{locale === 'pt-BR' ? 'Informe números inteiros válidos.' : 'Enter valid whole numbers.'}</p>
 				{/if}
+				<p class="calculator-copy">Independent monthly zero-balance scenarios; this range does not carry purchased leftovers between months.</p>
 			</div>
+			<p class="calculator-assumptions">
+				This calculator covers the recurring hosted plan. The lifetime plan is $49 once with
+				BYOK; self-hosting has no Moderaty subscription. Your OpenAI charges are separate and
+				outside this estimate, as are self-hosting infrastructure costs.
+			</p>
 		</div>
 	</Reveal>
 </section>
@@ -128,13 +161,13 @@
 	}
 	.t-dim { color: rgb(244 244 248 / 0.45); }
 	.t-lit { color: rgb(244 244 248 / 0.85); }
-	.t-mint { color: var(--mint); font-weight: 600; }
 	.calculator-grid {
 		display: grid;
 		grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
 		gap: 16px;
 		margin-top: 32px;
 	}
+	.calculator-assumptions { grid-column: 1 / -1; margin: 0; color: rgb(244 244 248 / 0.7); font-size: 13px; line-height: 1.6; }
 	.calculator {
 		border: 1px solid var(--line);
 		border-radius: var(--radius);
@@ -144,12 +177,16 @@
 	.calculator h3 { margin: 0; color: var(--paper); font-size: 18px; }
 	.calculator-copy { margin: 8px 0 16px; color: rgb(244 244 248 / 0.6); font-size: 13px; }
 	.calculator label { display: grid; gap: 6px; color: rgb(244 244 248 / 0.75); font-size: 12px; }
+	.calculator > label:not(:first-of-type) { margin-top: 12px; }
 	.calculator input { width: 100%; box-sizing: border-box; }
 	.calculator > strong { display: block; margin-top: 16px; color: var(--mint); font-family: var(--font-mono); font-size: 20px; }
 	.calculator > strong span, .forecast span { color: rgb(244 244 248 / 0.5); font-size: 11px; font-weight: 400; }
 	.month-inputs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
 	.forecast { margin: 16px 0 0; color: var(--mint); font-family: var(--font-mono); font-size: 18px; }
 	.input-error { margin: 12px 0 0; color: var(--brand); font-size: 12px; }
+	.estimate-breakdown { margin: 12px 0 0; color: rgb(244 244 248 / 0.7); font-size: 12px; }
+	.estimate-breakdown > div { display: flex; justify-content: space-between; gap: 12px; margin-top: 8px; }
+	.estimate-breakdown dd { margin: 0; text-align: right; }
 
 	.t-note {
 		margin-top: 12px;

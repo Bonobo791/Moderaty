@@ -25,6 +25,9 @@ function renderLog(overrides: Record<string, unknown> = {}) {
 			data: {
 				ch: { id: 'UC1', title: 'Ch' },
 				entries: [ENTRY],
+				recovery: [],
+				dispatches: [],
+				canRecover: true,
 				nextCursor: null,
 				hasPrev: false,
 				...overrides
@@ -83,4 +86,32 @@ test('the danger zone renders the erase-handles explanation and a labeled button
 test('the danger zone renders even with an empty log', () => {
 	const body = renderLog({ entries: [] });
 	expect(body).toContain('aria-label="Erase all stored commenter handles for this channel now"');
+});
+
+test('a blocked comment with no audit entry renders a visible error and a confirmed new restore action', () => {
+	const body = renderLog({ entries: [], recovery: [{ id: 'blocked', text: 'blocked text', restoreIntentId: 7 }] });
+	expect(body).toContain('class="error-box"');
+	expect(body).toContain('Automatic recovery is paused');
+	expect(body).toContain('blocked text');
+	expect(body).toContain('action="?/recoverRestore"');
+	expect(body).toContain('name="expectedIntentId" value="7"');
+	expect(body).toContain('name="confirmRestore"');
+	expect(body).toContain('required');
+	expect(body).toContain('publish this comment');
+	expect(body).toContain('aria-label="Restore blocked comment blocked"');
+});
+
+test('members see an owner recovery instruction without a recovery form', () => {
+	const body = renderLog({ recovery: [{ id: 'blocked', text: 'blocked text', restoreIntentId: null }], canRecover: false });
+	expect(body).toContain('Ask your organization owner');
+	expect(body).not.toContain('action="?/recoverRestore"');
+});
+
+test.each(['in_flight', 'uncertain'])('a %s write displays its paused-action explanation without a restore form', (state) => {
+	const body = renderLog({ entries: [], dispatches: [{ id: 'blocked', text: 'Pending remote result', state }] });
+	expect(body).toContain('Pending YouTube actions');
+	expect(body).toContain('Pending remote result');
+	expect(body).toContain('Further actions are paused');
+	expect(body).toContain(state === 'uncertain' ? 'Contact support' : 'Check again shortly');
+	expect(body).not.toContain('action="?/recoverRestore"');
 });

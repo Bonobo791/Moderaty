@@ -26,8 +26,8 @@ GitHub ──push──▶ Coolify (self-hosted server)
 Turso (external): prod app → production DB · dev app → dev-2 DB
 Netlify: unchanged until cutover; its production scheduled function keeps
 ticking the SAME production DB — safe, because /api/cron claims each channel
-with an expiring DB lease (channels.lease_expires_at), so two schedulers can
-never process one channel twice.
+with an expiring DB lease (channels.lease_expires_at), so a second scheduler
+cannot claim a channel while its lease remains held.
 ```
 
 Requirements met by this design:
@@ -51,10 +51,11 @@ Requirements met by this design:
 - **Fail-loud, bounded, idempotent — the same invariants as Netlify.**
   The image build is gated by `scripts/netlify-migrate.mjs` (migrate + verify
   before build; `CONTEXT` unset = the conservative always-run default); the
-  health check hits `/api/health` (fails on a dead database); cron ticks one
-  channel per minute via the lease-protected `/api/cron`; `DRY_RUN=true`
-  until verified (I8); a failed tick exits non-zero and appears in the
-  scheduled-task log.
+  health check hits `/api/health` (fails on a dead database); each cron tick
+  runs at most one workload via the lease-protected `/api/cron`;
+  `DRY_RUN=true` until verified (I8). Operator-actionable tick failures exit
+  non-zero and appear in the scheduled-task log; channel-owner-only failures
+  are suppressed as described in the Scheduled Task setup below.
 
 ## 2. What already ships in the repo (this change)
 
@@ -108,6 +109,20 @@ One-time setup (human, in the Coolify dashboard):
    | `MERCADOPAGO_ENVIRONMENT` / `MERCADOPAGO_PRICE_CREDITS_*_BRL_CENTS` | production | sandbox | optional Mercado Pago sandbox/production mode and BRL bundle prices in cents |
    | `PROTON_SMTP_USERNAME` / `PROTON_SMTP_TOKEN` | production token | dev token | Proton Mail SMTP for transactional e-mail (contact-form verification and service notices, incl. zero-credit account warnings). Username = the custom-domain sender mailbox and doubles as the From address (domain active in Proton, SPF/DKIM/DMARC verified); token from Proton → Settings → All settings → IMAP/SMTP → SMTP tokens — never the mailbox password, and a separate token per environment |
    | `PROTON_FROM_NAME` | `Moderaty` | `Moderaty` | optional sender display name; defaults to `Moderaty` |
+   | `ANALYTICS_ENABLED` | `false` until activation checklist passes | `false` until staging verification | optional Umami opt-in; Runtime Variable only, **Build Variable OFF** |
+   | `UMAMI_URL` / `UMAMI_WEBSITE_ID` | own HTTPS collector origin / production website UUID | separate staging website UUID | Runtime Variables only, **Build Variable OFF**; no configured values in Docker images |
+   | `ANALYTICS_ALLOWED_HOSTNAMES` | exact production browser hostnames | exact staging browser hostnames | comma-separated DNS names, at most 100 characters each; Runtime Variable only, **Build Variable OFF** |
+
+   **Optional audience measurement.** Use a separate Umami service and PostgreSQL
+   volume; Moderaty's database is unchanged. Keep production measurement disabled
+   until the privacy assessment, disclosures/notices, transfer records, tested
+   retention and actual-proxy browser acceptance are complete. Public pages read
+   settings from the no-store `/api/analytics` endpoint; retain the Bunny `/api/*`
+   cache bypass. No tracking script, Google request or GTM fallback is installed.
+   DNT, GPC and the public footer's Audience measurement preference suppress
+   collection. Exact browser hostname checks protect forks and pinned-ORIGIN
+   aliases. See [ANALYTICS.md](ANALYTICS.md) for the service setup, strict payload
+   policy, operator checklist and rollback procedure.
 
    **Stripe webhook endpoint is per-environment, per-sandbox.** Register
    `https://<app-domain>/api/stripe/webhook` under **Developers → Webhooks**
@@ -181,6 +196,18 @@ One-time setup (human, in the Coolify dashboard):
    by design: the credentials must never appear in build args, image history,
    or baked layers.
 
+   **Interrupted npm downloads.** The dependency-install step runs
+   `scripts/install-dependencies.mjs`, keeping `npm ci --ignore-scripts` and
+   npm's fetch retries. A connection reset while reading a tarball can escape
+   those fetch retries. The helper logs and retries the whole locked install
+   for `ECONNRESET`, `ETIMEDOUT`, or `EAI_AGAIN`, with at most three attempts
+   and waits of 5 then 10 seconds. A BuildKit npm cache retains verified
+   downloads; `npm ci` replaces partial `node_modules`. Permanent errors
+   (including invalid lockfiles, integrity failures, and authentication
+   failures) stop immediately. If all three attempts fail, the image build
+   remains blocked: inspect the build server's registry connectivity and
+   retry the deployment after it recovers.
+
    **Operator checklist (all three, then redeploy):**
    1. **Use Docker Build Secrets** is ON (Environment Variables settings).
    2. **Build Variable ON for `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`
@@ -215,6 +242,18 @@ One-time setup (human, in the Coolify dashboard):
    worktree `.env`, this app's env vars, and the Netlify branch-deploys
    context.
 
+   **An extra migration hash can indicate a lost journal entry.** The
+   2026-10-04 deployment of `bd7e04e` passed preflight and migration, then
+   verification rejected `EXTRA applied hash da0cfc786b88…` (66 applied,
+   65 journal entries). That hash belongs to the unchanged
+   `0064_cron_workload_fairness.sql`; a merge had omitted its journal entry.
+   The repair restores that entry and the snapshot chain. Additive migration
+   `0066_repair_scheduler_journal` also handles installations that already
+   applied 0065 without 0064: it creates the missing scheduler table and
+   records the replayed 0064 hash, preserving an existing scheduler turn.
+   Deploy the repaired source through the normal migrate-and-verify gate.
+   Do not erase applied hashes or disable verification to clear this error.
+
    **Build Variable flags — only the two TURSO_* variables need them.**
    Coolify injects an `ARG` statement into the Dockerfile for every env var
    with Build Variable ON (a misconfigured app logs hadolint
@@ -229,19 +268,39 @@ One-time setup (human, in the Coolify dashboard):
 
 5. **Scheduled Task** (Scheduled Tasks → application): expression `* * * * *`,
    command `APP_URL=http://127.0.0.1:3000 node scripts/dev-cron.mjs --once`.
-   One task replaces the Netlify Scheduled Function; N channels ⇒ each
-   channel scanned every N minutes, exactly as on Netlify. The script exits
+   One task replaces the Netlify Scheduled Function. Without pending feedback
+   previews, N eligible live channels rotate about every N schedule intervals.
+   When previews and live moderation are both ready, they alternate slots, so
+   the live rotation is about 2N schedule intervals; neither class can monopolize
+   ticks. See [cron workload fairness](cron-workload-fairness.md) for leases,
+   retry expiry, and examples at different schedule intervals.
+   The script exits
    non-zero (→ Coolify's task-failure notification) only for
-   operator-actionable failures: the endpoint unreachable/non-OK, a failed
-   sweep (`ok:false`), `budgetExhausted`, a lost run-health write, or a
-   channel error category the owner cannot fix. Channel-owner states —
+   operator-actionable failures: configuration or transport errors,
+   non-suppressed HTTP failures, invalid response bodies, failed sweeps or
+   auxiliary jobs, `budgetExhausted`, a lost run-health write, or a channel
+   error category the owner cannot fix. A non-OK response whose only channel
+   failures are `credits` or `token`, with no operator problems, is suppressed.
+   These channel-owner states —
    `credits` (top-up needed) and `token` (reconnect needed) — are persistent
    and already surfaced on the dashboard, so they log a warning and keep the
    task green instead of emailing once a minute until the owner acts.
+   Failure output includes safe nested diagnostics (category, known code,
+   syscall, provider/service, HTTP error status and operation) plus a
+   server-generated `run` identifier matching `cronRunId` in the structured
+   `cron failure:` log entry. For example, `EAI_AGAIN` with
+   `operation=auto_topup.lifetime_candidates` identifies a database lookup
+   failure before lifetime reconciliation or new charges. Cause traversal is
+   limited to eight nodes; `causeChainTruncated=true` marks a longer or cyclic
+   chain. SQL, parameters, URLs, tokens, customer identifiers and raw provider
+   bodies are excluded. Older responses without safe diagnostics name the
+   failed job and withhold their raw details. These diagnostics do not change
+   alert decisions, add retries, or resolve the underlying network failure.
    Optionally set **`HEALTHCHECK_PING_URL`** (Runtime Variable; healthchecks.io
-   or a Uptime Kuma push monitor) — every answered tick pings it, a thrown
-   tick stays silent, so the monitor alerts once per outage and also catches
-   the task never running at all, which an exit code can't report.
+   or a Uptime Kuma push monitor) — healthy and suppressed owner-actionable
+   ticks attempt the ping; ticks that throw stay silent, so the monitor alerts
+   on silence and also catches the task never running at all, which an exit
+   code can't report.
 6. **Domain**: the app's fqdn is the *origin* hostname (e.g.
    `moderaty-prod.<server>`); the public domain points at Bunny (§5), not at
    the app.
@@ -318,14 +377,34 @@ instance doubles as the live branch-deploy that Netlify used to provide.
 - Prod and dev each drain through their own container's Scheduled Task; both
   hit `/api/cron` on localhost with `CRON_SECRET` in the Authorization header.
 - Until Netlify is retired its production Scheduled Function keeps ticking the
-  same production DB — the per-channel DB lease makes the overlap safe
-  (double cadence at worst, never double processing).
+  same production DB. Overlap requires every writer to run the same
+  reservation-aware moderation version. The per-channel DB lease coordinates
+  cron runs; it does not make older queue actions or reconciliation workers
+  honor newer human-dispatch reservations.
 - Retention sweeps (consent e-mails 10y, handles 30d) run inside the same
   endpoint and move to Coolify with it; `DRY_RUN` keeps both no-ops (I8).
 
 ## 8. Cutover & Netlify retirement (human-only, in order)
 
 Each step has a verify gate; do not proceed past a failed gate.
+
+For the first deployment of `human_dispatch_token` / `human_dispatch_state`,
+pause both cron schedules and quiesce older moderation writers, including
+manual queue/Undo requests and every app replica, before starting the new
+version. Drain outstanding requests and investigate any unresolved remote
+outcome. Apply and verify the additive migrations, start only reservation-aware
+writers, and then resume scheduling. Both deployment targets must honor the
+reservation before their schedules overlap. This is a human-operated cutover;
+the additive database schema alone does not provide that runtime barrier.
+
+Do not roll back to reservation-unaware code while a reservation exists.
+Keep affected writers paused and investigate instead of clearing ownership
+to permit a rollback. A paused dispatch can be released only with evidence
+that its request never began or has settled; elapsed time and the current
+YouTube comment state alone do not prove an earlier request cannot still land.
+Record the evidence and reconcile the exact comment, intent, and dispatch
+token with a guarded update so a newer owner cannot be overwritten. Production
+record changes remain human-only.
 
 1. **Dev app first** (dev DB is safe to break): deploy, check health, sign in,
    connect a channel, confirm the scheduled task ticks with `dryRun: true`.
@@ -342,7 +421,7 @@ Each step has a verify gate; do not proceed past a failed gate.
 6. **Go live**: `DRY_RUN=false` on prod, trigger one tick, verify held
    comments appear in YouTube Studio.
 7. **Soak 1–2 weeks** with Netlify production still published (its cron
-   overlaps safely per §7 — or pause it from Netlify's Functions UI).
+   overlaps under the version barrier in §7 — or pause it from Netlify's Functions UI).
 8. **Retire Netlify**: delete the Netlify site (stops its builds and
    Scheduled Function); optionally remove the Netlify redirect URIs from both
    Google clients. Leave `netlify.toml`, `netlify/`, and adapter-netlify in

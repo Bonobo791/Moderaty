@@ -29,6 +29,61 @@
 	restored here; deletions and author bans are permanent.
 </p>
 
+{#if data.dispatches.length || data.nextDispatchHref || data.firstDispatchHref}
+	<div class="card">
+		<h2>Pending YouTube actions</h2>
+		{#each data.dispatches as comment (comment.id)}
+			<p>{comment.text}<br /><small class="muted">{comment.id}</small></p>
+			<p class="error-box" role="alert">
+				Further actions are paused to protect the recorded decision.
+				{#if comment.state === 'uncertain'}
+					YouTube did not confirm the outcome. Contact support before changing this comment's moderation.
+				{:else}
+					The action is in progress. Check again shortly; if it stays pending, contact support.
+				{/if}
+			</p>
+		{/each}
+		<nav class="pager" aria-label="Pending YouTube action pages">
+			{#if data.firstDispatchHref}<a class="btn secondary small" href={data.firstDispatchHref}>First pending actions</a>{/if}
+			{#if data.nextDispatchHref}<a class="btn secondary small" href={data.nextDispatchHref}>More pending YouTube actions →</a>{/if}
+		</nav>
+	</div>
+{/if}
+
+{#if data.recovery.length || data.nextRecoveryHref || data.firstRecoveryHref}
+	<div class="card">
+		<h2>Comments needing recovery</h2>
+		{#if data.recovery.length}
+		<p class="error-box" role="alert">
+			Automatic recovery is paused because these pending actions could not be verified.
+			Restore only if you want the comment published on YouTube. Deleted comments and author bans cannot be reversed.
+		</p>
+		{:else}
+			<p class="muted">Continue through the pending claims to check whether any need recovery.</p>
+		{/if}
+		{#each data.recovery as comment (`${comment.id}:${comment.restoreIntentId ?? ''}`)}
+			<p>{comment.text}<br /><small class="muted">{comment.id}</small></p>
+			{#if data.canRecover}
+				<form method="POST" action="?/recoverRestore">
+					<input type="hidden" name="commentId" value={comment.id} />
+					<input type="hidden" name="expectedIntentId" value={comment.restoreIntentId ?? ''} />
+					<label>
+						<input type="checkbox" name="confirmRestore" value="yes" required />
+						I want to publish this comment with a new restore request.
+					</label>
+					<button class="btn secondary small" type="submit" aria-label="Restore blocked comment {comment.id}">Restore comment</button>
+				</form>
+			{:else}
+				<p class="muted">Ask your organization owner to choose whether to restore this comment.</p>
+			{/if}
+		{/each}
+		<nav class="pager" aria-label="Pending claim pages">
+			{#if data.firstRecoveryHref}<a class="btn secondary small" href={data.firstRecoveryHref}>First pending claims</a>{/if}
+			{#if data.nextRecoveryHref}<a class="btn secondary small" href={data.nextRecoveryHref}>More pending claims →</a>{/if}
+		</nav>
+	</div>
+{/if}
+
 {#if form?.error}
 	<p class="error-box" role="alert">{form.error}</p>
 {/if}

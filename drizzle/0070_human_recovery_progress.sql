@@ -1,0 +1,2 @@
+ALTER TABLE `channels` ADD `human_recovery_cursor` text;--> statement-breakpoint
+CREATE INDEX `comments_human_recovery_eligible_idx` ON `comments` (`channel_id`,`id`) WHERE "comments"."status" = 'restoring' and "comments"."human_dispatch_token" is null and "comments"."human_dispatch_state" is null;

@@ -41,6 +41,9 @@ const mocks = vi.hoisted(() => {
 		commentStatuses: {} as Record<string, string>,
 		// comments.decidedBy for pre-stored rows (existingIds).
 		commentDecidedBy: {} as Record<string, string>,
+		commentRestoreIntentIds: {} as Record<string, number | null>,
+		commentHumanDispatchTokens: {} as Record<string, string | null>,
+		commentHumanDispatchStates: {} as Record<string, string | null>,
 		// Fired at the start of every comments .all() query with its call index,
 		// so a test can flip a stored status BETWEEN two reads in one flow
 		// (e.g. a human release landing between partition and supersede).
@@ -64,7 +67,10 @@ const mocks = vi.hoisted(() => {
 			id,
 			status: staged?.status ?? state.commentStatuses[id] ?? 'held',
 			decidedBy: staged?.decidedBy ?? state.commentDecidedBy[id] ?? 'ai',
-			scanId: staged?.scanId ?? null
+			scanId: staged?.scanId ?? null,
+			restoreIntentId: staged?.restoreIntentId !== undefined ? staged.restoreIntentId : state.commentRestoreIntentIds[id] ?? null,
+			humanDispatchToken: staged?.humanDispatchToken !== undefined ? staged.humanDispatchToken : state.commentHumanDispatchTokens[id] ?? null,
+			humanDispatchState: staged?.humanDispatchState !== undefined ? staged.humanDispatchState : state.commentHumanDispatchStates[id] ?? null
 		};
 	};
 	const commentsAll = (condition: unknown) => {
@@ -76,16 +82,24 @@ const mocks = vi.hoisted(() => {
 		state.onCommentsSelect?.(state.commentsSelectCalls);
 		const params = queryParams(condition);
 		const statusFilter = params.filter((param) => COMMENT_STATUSES.has(param as string));
+		const includesDispatchOwners = querySql(condition).includes('"comments"."human_dispatch_token" is not null');
 		// The rescan staged-marker read (eq comments.scan_id = stamp): a
 		// row only matches when its stamp equals the bound value — NULL
 		// never equals, like real SQL.
 		const scanFiltered = querySql(condition).includes('"comments"."scan_id"');
+		const eligibleRecovery = querySql(condition).includes("\"comments\".\"status\" = 'restoring'");
+		const recoveryAfter = comparisonParam(condition, comments.id, '>');
+		const recoveryEnd = comparisonParam(condition, comments.id, '<=');
 		return [...new Set([
 			...state.existingIds,
 			...state.insertedComments.map((comment) => queryKey(comment.id))
 		])].map((id) => commentRowFor(id)).filter((row) =>
-			(params.includes(row.id) || (statusFilter.length > 0 && statusFilter.includes(row.status)))
-			&& (!scanFiltered || params.includes(row.scanId)));
+			(params.includes(row.id) || (eligibleRecovery && row.status === 'restoring') || (statusFilter.length > 0 && statusFilter.includes(row.status)) ||
+				(includesDispatchOwners && (row.humanDispatchToken !== null || row.humanDispatchState !== null)))
+			&& (!scanFiltered || params.includes(row.scanId))
+			&& (!eligibleRecovery || (row.status === 'restoring' && row.humanDispatchToken === null && row.humanDispatchState === null))
+			&& (recoveryAfter === undefined || row.id > recoveryAfter)
+			&& (recoveryEnd === undefined || row.id <= recoveryEnd));
 	};
 	const selectGet = async (table: unknown, condition: unknown) => {
 		if (table === state.tables.channels) {
@@ -114,12 +128,12 @@ const mocks = vi.hoisted(() => {
 		// subscription periods, so no row matches — the honest answer.
 		if (table === state.tables.stripeSubscriptionPeriods) return undefined;
 		if (table === state.tables.auditLog) {
-			// "Latest" reads sort createdAt/id desc — approximate by
-			// returning the last inserted row matching both eq()s.
+			// Audit reads honor the channel/comment scope and, when present,
+			// the exact intent ID and user actor instead of borrowing history.
 			const params = queryParams(condition);
 			const matches = state.insertedAudits.filter((row) =>
 				params.includes(queryKey(row.commentId)) && params.includes(queryKey(row.channelId)));
-			return matches.at(-1);
+			return matches.filter((row) => matchesBoundParam(condition, auditLog.id, row.id) && matchesBoundParam(condition, auditLog.actor, row.actor)).at(-1);
 		}
 		if (table === state.tables.creditTransactions) {
 			// hasChargeAnchor's (org_id, ref_type, ref_id) lookup: a row only
@@ -172,13 +186,17 @@ const mocks = vi.hoisted(() => {
 	};
 	const query = (table: unknown) => ({
 		where: (condition?: unknown) => {
+			let rowLimit: number | undefined;
+			let descending = false;
 			const inner = {
 			get: async () => selectGet(table, condition),
-			all: async () => selectAll(table, condition)
+			all: async () => {
+				const rows = await selectAll(table, condition);
+				if (table === state.tables.comments) (rows as Array<{ id: string }>).sort((a, b) => a.id.localeCompare(b.id) * (descending ? -1 : 1));
+				return rows.slice(0, rowLimit);
+			}
 			};
-			// The fake stores no sort order — orderBy/limit pass through so
-			// query-builder chains keep working, returning the same shape.
-			const chain = { ...inner, orderBy: () => chain, limit: () => chain };
+			const chain = { ...inner, orderBy: (order: unknown) => { descending = querySql(order).includes('desc'); return chain; }, limit: (count: number) => { rowLimit = count; return chain; } };
 			return chain;
 		}
 	});
@@ -201,23 +219,39 @@ const mocks = vi.hoisted(() => {
 			const identityMatches = params.length <= 2 || params.includes(state.channel?.refreshTokenEnc);
 			return { returning: async () => state.channel?.active && identityMatches ? [{ id: state.channel.id }] : [] };
 		}
+		if ('humanRecoveryCursor' in values) {
+			if (!matchesBoundParam(condition, channels.humanRecoveryCursor, state.channel?.humanRecoveryCursor)
+				|| !matchesBoundParam(condition, channels.leaseExpiresAt, state.channel?.leaseExpiresAt)) return { returning: async () => [] };
+			Object.assign(state.channel, values);
+			return { returning: async () => [{ id: state.channel.id }] };
+		}
 		// persistResults' scan-identity checkpoint guard: the WHERE
 		// binds the run's read values (eq) or asserts the column null
 		// (isNull). Compare against the LIVE row — a mid-run replant
 		// mismatches, the real UPDATE affects 0 rows, and nothing
 		// records (codeant race).
-		const scanGuard = (column: 'history_scan_id' | 'history_boundary'): boolean => {
-			const bound = boundParam(condition, column);
-			const live = column === 'history_scan_id' ? state.channel?.historyScanId : state.channel?.historyBoundary;
-			if (bound.kind === 'eq') return bound.value === live;
-			if (bound.kind === 'isNull') return live == null;
-			return true;
-		};
-		if (!scanGuard('history_scan_id') || !scanGuard('history_boundary')) {
+		if (!matchesBoundParam(condition, channels.historyScanId, state.channel?.historyScanId)
+			|| !matchesBoundParam(condition, channels.historyBoundary, state.channel?.historyBoundary)) {
 			return { returning: async () => [] as Record<string, unknown>[] };
 		}
 		state.channelUpdates.push(values);
 		return { returning: async () => [{ id: state.channel.id }] };
+	};
+	const matchesCommentUpdate = (row: Record<string, unknown>, condition: unknown, params: unknown[], statusFilter: unknown[]) =>
+		params.includes(queryKey(row.id)) && (!statusFilter.length || statusFilter.includes(row.status))
+		&& matchesBoundParam(condition, comments.restoreIntentId, row.restoreIntentId)
+		&& matchesBoundParam(condition, comments.humanDispatchToken, row.humanDispatchToken)
+		&& matchesBoundParam(condition, comments.humanDispatchState, row.humanDispatchState);
+	const updateExistingComment = (id: string, values: Record<string, unknown>) => {
+		if ('status' in values) state.commentStatuses[id] = values.status as string;
+		if ('decidedBy' in values) state.commentDecidedBy[id] = values.decidedBy as string;
+		if ('restoreIntentId' in values) state.commentRestoreIntentIds[id] = values.restoreIntentId as number | null;
+		if ('humanDispatchToken' in values) state.commentHumanDispatchTokens[id] = values.humanDispatchToken as string | null;
+		if ('humanDispatchState' in values) state.commentHumanDispatchStates[id] = values.humanDispatchState as string | null;
+	};
+	const projectCommentUpdates = (fields: unknown, applied: Record<string, unknown>[]) => {
+		if (!fields || typeof fields !== 'object') return [];
+		return applied.map((row) => Object.fromEntries(Object.keys(fields).map((key) => [key, row[key]])));
 	};
 	const updateComments = (values: Record<string, unknown>, condition: unknown) => {
 		// Status/decidedBy writes honor the where: id predicates AND
@@ -228,26 +262,22 @@ const mocks = vi.hoisted(() => {
 		const statusFilter = params.filter((param) => COMMENT_STATUSES.has(param as string));
 		const applied: Record<string, unknown>[] = [];
 		const apply = (row: Record<string, unknown>) => {
-			const current = row.status as string;
-			if (params.includes(queryKey(row.id)) && (!statusFilter.length || statusFilter.includes(current))) {
+			if (matchesCommentUpdate(row, condition, params, statusFilter)) {
 				Object.assign(row, values);
 				applied.push(row);
 			}
 		};
 		state.insertedComments.forEach(apply);
 		for (const id of state.existingIds) {
-			const current = state.commentStatuses[id] ?? 'held';
-			if (params.includes(id) && (!statusFilter.length || statusFilter.includes(current))) {
-				if ('status' in values) state.commentStatuses[id] = values.status as string;
-				if ('decidedBy' in values) state.commentDecidedBy[id] = values.decidedBy as string;
+			const row = { id, status: state.commentStatuses[id] ?? 'held', restoreIntentId: state.commentRestoreIntentIds[id],
+				humanDispatchToken: state.commentHumanDispatchTokens[id], humanDispatchState: state.commentHumanDispatchStates[id] };
+			if (matchesCommentUpdate(row, condition, params, statusFilter)) {
+				updateExistingComment(id, values);
 				applied.push({ id });
 			}
 		}
 		return {
-			returning: async (fields: unknown) =>
-				fields && typeof fields === 'object'
-					? applied.map((row) => Object.fromEntries(Object.keys(fields).map((key) => [key, row[key]])))
-					: []
+			returning: async (fields: unknown) => projectCommentUpdates(fields, applied)
 		};
 	};
 	const claimActionRows = (values: Record<string, unknown>, condition: unknown) => {
@@ -347,7 +377,7 @@ const mocks = vi.hoisted(() => {
 				};
 			}
 		})),
-		select: vi.fn(() => ({ from: (table: unknown) => query(table) })),
+		select: vi.fn(() => ({ from: (table: unknown) => query(table instanceof SQL && querySql(table).includes('indexed by comments_human_recovery_eligible_idx') ? state.tables.comments : table) })),
 		delete: vi.fn((table: unknown) => ({
 			where: async () => {
 				if (table === state.tables.creditTransactions) {
@@ -372,8 +402,13 @@ const mocks = vi.hoisted(() => {
 			channel: state.channel ? { ...state.channel } : state.channel,
 			channelUpdates: [...state.channelUpdates],
 			insertedCredits: [...state.insertedCredits],
-			insertedComments: [...state.insertedComments],
+			insertedComments: state.insertedComments.map((row) => ({ ...row })),
 			insertedAudits: [...state.insertedAudits],
+			commentStatuses: { ...state.commentStatuses },
+			commentDecidedBy: { ...state.commentDecidedBy },
+			commentRestoreIntentIds: { ...state.commentRestoreIntentIds },
+			commentHumanDispatchTokens: { ...state.commentHumanDispatchTokens },
+			commentHumanDispatchStates: { ...state.commentHumanDispatchStates },
 			moderationActions: state.moderationActions.map((row) => ({ ...row }))
 		};
 		try {
@@ -385,6 +420,11 @@ const mocks = vi.hoisted(() => {
 			state.insertedCredits = snapshot.insertedCredits;
 			state.insertedComments = snapshot.insertedComments;
 			state.insertedAudits = snapshot.insertedAudits;
+			state.commentStatuses = snapshot.commentStatuses;
+			state.commentDecidedBy = snapshot.commentDecidedBy;
+			state.commentRestoreIntentIds = snapshot.commentRestoreIntentIds;
+			state.commentHumanDispatchTokens = snapshot.commentHumanDispatchTokens;
+			state.commentHumanDispatchStates = snapshot.commentHumanDispatchStates;
 			state.moderationActions = snapshot.moderationActions;
 			throw error;
 		}
@@ -393,7 +433,7 @@ const mocks = vi.hoisted(() => {
 	return {
 		state,
 		db: {
-			select: vi.fn(() => ({ from: (table: unknown) => query(table) })),
+			select: vi.fn(() => ({ from: (table: unknown) => query(table instanceof SQL && querySql(table).includes('indexed by comments_human_recovery_eligible_idx') ? state.tables.comments : table) })),
 			insert: vi.fn((table: unknown) => ({ values: async (values: unknown) => store(table, values) })),
 			transaction: vi.fn(runTransaction),
 			update: vi.fn((table: unknown) => transaction.update(table)),
@@ -422,15 +462,17 @@ export function getMocks() { return mocks; }
 
 vi.mock('recheck', () => ({ checkSync: mocks.checkSync }));
 vi.mock('$lib/server/crypto', () => ({ decrypt: mocks.decrypt }));
-vi.mock('$lib/server/db', () => ({ db: mocks.db }));
+vi.mock('$lib/server/db', () => ({ db: mocks.db, withBusyRetry: (run: () => Promise<unknown>) => run() }));
 vi.mock('$env/dynamic/private', () => ({ env: mocks.state.env }));
-vi.mock('$lib/server/http', () => ({
+vi.mock('$lib/server/http', async (original) => ({
+	...await original<typeof import('$lib/server/http')>(),
 	assertBeforeDeadline: mocks.assertBeforeDeadline,
 	DeadlineExceededError: mocks.DeadlineExceededError,
 	// importOriginal evaluates the real youtube.ts under this mock — its
 	// fetchWithRetry import must resolve, or an un-stubbed real export
 	// fails as "undefined is not a function" instead of a clear mock call.
-	fetchWithRetry: mocks.fetchWithRetry
+	fetchWithRetry: mocks.fetchWithRetry,
+	fetchSingleAttempt: mocks.fetchWithRetry
 }));
 vi.mock('$lib/server/moderation', () => ({
 	scoreComment: mocks.scoreComment,
@@ -457,7 +499,8 @@ vi.mock('$lib/server/youtube', async (importOriginal) => ({
 }));
 
 import { auditLog, channelAllowedHandles, channels, comments, creditTransactions, moderationActions, organizations, rules, stripeSubscriptionPeriods } from '$lib/server/db/schema';
-import { SQLiteSyncDialect } from 'drizzle-orm/sqlite-core';
+import { SQL, sql } from 'drizzle-orm';
+import { SQLiteSyncDialect, type SQLiteColumn } from 'drizzle-orm/sqlite-core';
 import type { NewComment } from '../youtube';
 
 const dialect = new SQLiteSyncDialect();
@@ -480,14 +523,29 @@ function querySql(condition: unknown): string {
 
 type BoundParam = { kind: 'eq'; value: unknown } | { kind: 'isNull' | 'absent' };
 
-/** The bound value of a `"channels"."col" = ?` clause — its position among the
+/** The bound value of a qualified column equality — its position among the
  * placeholders is counted, not assumed, so predicate order stays the caller's
  * business. 'isNull' and 'absent' cover the other clause shapes. */
-function boundParam(condition: unknown, column: string): BoundParam {
-	const sql = querySql(condition);
-	const eqPos = sql.indexOf(`"channels"."${column}" = ?`);
-	if (eqPos === -1) return { kind: sql.includes(`"channels"."${column}" is null`) ? 'isNull' : 'absent' };
-	return { kind: 'eq', value: queryParams(condition)[sql.slice(0, eqPos).split('?').length - 1] };
+function boundParam(condition: unknown, column: SQLiteColumn): BoundParam {
+	const conditionSql = querySql(condition);
+	const columnSql = querySql(sql`${column}`);
+	const eqPos = conditionSql.indexOf(`${columnSql} = ?`);
+	if (eqPos === -1) return { kind: conditionSql.includes(`${columnSql} is null`) ? 'isNull' : 'absent' };
+	return { kind: 'eq', value: queryParams(condition)[conditionSql.slice(0, eqPos).split('?').length - 1] };
+}
+
+function matchesBoundParam(condition: unknown, column: SQLiteColumn, value: unknown): boolean {
+	const bound = boundParam(condition, column);
+	if (bound.kind === 'eq') return value === bound.value;
+	if (bound.kind === 'isNull') return value == null;
+	return true;
+}
+
+function comparisonParam(condition: unknown, column: SQLiteColumn, operator: string): string | undefined {
+	const expression = querySql(condition);
+	const position = expression.indexOf(`${querySql(sql`${column}`)} ${operator} ?`);
+	if (position < 0) return undefined;
+	return queryParams(condition)[expression.slice(0, position).split('?').length - 1] as string;
 }
 
 function valueRows(values: unknown): Record<string, unknown>[] {
@@ -669,6 +727,8 @@ export function resetPipelineMocks() {
 		scanCursor: null,
 		historyBoundary: null,
 		historyScanId: null,
+		humanRecoveryCursor: null,
+		leaseExpiresAt: null,
 		active: 1,
 		toneLevel: null,
 		createdAt: '2026-01-01T00:00:00.000Z'
@@ -683,6 +743,9 @@ export function resetPipelineMocks() {
 	mocks.state.moderationActions = [];
 	mocks.state.commentStatuses = {};
 	mocks.state.commentDecidedBy = {};
+	mocks.state.commentRestoreIntentIds = {};
+	mocks.state.commentHumanDispatchTokens = {};
+	mocks.state.commentHumanDispatchStates = {};
 	mocks.state.commentsSelectCalls = 0;
 	mocks.state.onCommentsSelect = undefined;
 	mocks.decrypt.mockReturnValue('refresh-token');

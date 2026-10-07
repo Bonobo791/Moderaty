@@ -41,6 +41,40 @@ function makeEvent() {
 	};
 }
 
+test.each(['/blogs', '/blogs/how-to-deal-with-hate-comments-on-youtube'])(
+	'public blog %s stays available without database migrations or a valid session',
+	async (routeId) => {
+		mocks.assertMigrationsCurrent.mockImplementation(async () => error(503, 'Migrations pending'));
+		mocks.getSessionUser.mockImplementation(async () => error(500, 'Session integrity failure'));
+		const event = {
+			...makeEvent(),
+			route: { id: routeId },
+			url: new URL(`https://preview.example${routeId}/`)
+		};
+		const response = Promise.resolve(handle({
+			event,
+			resolve: async (_event: unknown, opts?: { transformPageChunk?: (input: { html: string; done: boolean }) => string }) =>
+				new Response(opts?.transformPageChunk?.({ html: '<html lang="en"><body>Public article</body></html>', done: true }))
+		} as never));
+		await expect(response.then((value) => value.text())).resolves.toBe('<html lang="en"><body>Public article</body></html>');
+		expect((await response).headers.get('x-robots-tag')).toBeNull();
+		expect(mocks.assertMigrationsCurrent).not.toHaveBeenCalled();
+		expect(mocks.getSessionUser).not.toHaveBeenCalled();
+	}
+);
+
+test('analytics configuration remains available without the database or session and stays noindex', async () => {
+	mocks.assertMigrationsCurrent.mockRejectedValue(new Error('database unavailable'));
+	vi.spyOn(console, 'error').mockImplementation(() => {});
+	mocks.getSessionUser.mockRejectedValue(new Error('database unavailable'));
+	const event = { ...makeEvent(), route: { id: '/api/analytics' } };
+	const response = await handle({ event, resolve: async () => new Response('null') } as never);
+	expect(await response.text()).toBe('null');
+	expect(response.headers.get('x-robots-tag')).toBe('noindex');
+	expect(mocks.assertMigrationsCurrent).not.toHaveBeenCalled();
+	expect(mocks.getSessionUser).not.toHaveBeenCalled();
+});
+
 test('the locale is read from the exported LOCALE_COOKIE and applied to the html lang', async () => {
 	// The cookie name must come from $lib/i18n/locale's LOCALE_COOKIE, not a
 	// hardcoded string that can drift from the writer in /api/locale (cubic).

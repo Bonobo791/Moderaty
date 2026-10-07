@@ -29,6 +29,16 @@ const PRIVATE_PATHS = [
 	'/usage'
 ];
 
+test('the blog index and single article each have one sitemap entry and stay indexable', () => {
+	for (const path of ['/blogs/', '/blogs/how-to-deal-with-hate-comments-on-youtube/']) {
+		expect(sitemapXml().split(`<loc>https://moderaty.example${path}</loc>`)).toHaveLength(2);
+		expect(isNoIndexRoute(path.replace(/\/$/, ''))).toBe(false);
+	}
+	for (const path of ['/blog/', '/guides/youtube-hate-comments/']) {
+		expect(sitemapXml()).not.toContain(`<loc>https://moderaty.example${path}</loc>`);
+	}
+});
+
 test('the sitemap lists exactly the public pages as absolute APP_URL URLs', () => {
 	const xml = sitemapXml();
 

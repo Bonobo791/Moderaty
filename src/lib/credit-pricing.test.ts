@@ -1,9 +1,17 @@
 import { describe, expect, test } from 'vitest';
 
-import { CREDIT_PRICE_BANDS, USD_PER_CREDIT, bundleDiscountPercent, expectedBundlePriceCents, progressiveCreditCostUsd, purchasableCreditCostUsd } from './credit-pricing';
+import { CREDIT_PRICE_BANDS, USD_PER_CREDIT, bundleDiscountPercent, expectedBundlePriceCents, progressiveCreditCostUsd, purchasableCreditCostUsd, purchasableCreditEstimate } from './credit-pricing';
 import { CREDIT_BUNDLES } from './server/stripe/bundles';
 
 describe('credit volume pricing', () => {
+	test.each([
+		[0, 0, 0], [100, 20.4, 500], [500, 20.4, 500], [501, 40.8, 1000],
+		[1500, 61.2, 1500], [1501, 64.65, 2000], [2000, 64.65, 2000],
+		[2001, 85.05, 2500], [9900, 323.25, 10000]
+	])('reports the cost and actual purchased quantity for %i required credits', (needed, costUsd, credits) => {
+		expect(purchasableCreditEstimate(needed)).toEqual({ costUsd, credits });
+		expect(purchasableCreditEstimate(needed).costUsd).toBe(purchasableCreditCostUsd(needed));
+	});
 	test('the Stripe catalog advertises exactly the table-derived cuts — no drift', () => {
 		// bundles.ts derives discountPercent from the shared table; this pins
 		// the wiring so the Usage-page buttons and the landing calculators can

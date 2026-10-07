@@ -1,0 +1,58 @@
+{
+	"library_file_id": "libfile_b6384591060c819199f6b74cf3d87c65",
+	"file_id": "file_00000000154881fa88534381485d7b0b",
+	"version_id": "1",
+	"filename": "Moderaty_Hate_Comments_Example_Article.docx",
+	"source_size_bytes_reported_by_library": 42948,
+	"extraction": {
+		"route": "Authorized Library full-text read",
+		"date": "2026-10-06",
+		"start_line": 1,
+		"end_line": 154,
+		"total_lines": 154,
+		"has_more": false,
+		"next_read": null,
+		"pages": [
+			1,
+			2,
+			3,
+			4
+		],
+		"warnings": [],
+		"sha256_of_content_joined_with_newlines": "dcab789c5f5d19996012e1b8d2d3075f42abc47e7986e2d4419b407855087081"
+	},
+	"published_body_pages": [
+		1,
+		2,
+		3
+	],
+	"internal_editorial_notes_page": 4,
+	"metadata_source": "Title, H1, description and owning route from page 4; review status and draft dates are not publication metadata.",
+	"materialization": {
+		"status": "Blocked",
+		"error": "Workspace outbound proxy: Tunnel connection failed: 403 Forbidden",
+		"binary_verified": false,
+		"resolution": "User authorized complete Library full-text extraction for prose implementation; no additional download attempted."
+	},
+	"citations": {
+		"original_docx_hyperlink_targets": "Not included in Library text extraction",
+		"resolution": "Matched source-register subjects to live primary documentation and verified relevant passages on 2026-10-06.",
+		"youtube_help_answer_ids": [
+			"9483359",
+			"9482556",
+			"15535966",
+			"9482361",
+			"9482367",
+			"2802027",
+			"2802268"
+		],
+		"moderaty_source": "https://moderaty.com/#faq",
+		"repository_checks": [
+			"src/lib/landing/faq.ts",
+			"src/lib/server/dryRun.ts",
+			"src/lib/server/pipeline/decisions.ts"
+		]
+	},
+	"implementation_route": "/blogs/how-to-deal-with-hate-comments-on-youtube/",
+	"live_youtube_control_test": "Not performed; documented steps verified against official help pages."
+}

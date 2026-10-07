@@ -26,7 +26,7 @@ vi.mock('$lib/server/youtube', () => ({
 
 import { countDbStatements, setupTestDb, testDb } from '../testdb';
 import { auditLog, channels, comments, creditTransactions, moderationActions, organizations } from '../db/schema';
-import { stageDecisions } from './staging';
+import { stageDecisions, stageOrAuditDecisions } from './staging';
 import type { Decision } from './types';
 
 setupTestDb(['audit_log', 'moderation_actions', 'comments', 'channels', 'credit_transactions', 'organizations']);
@@ -71,6 +71,21 @@ function holdBatch(count: number, prefix: string): Decision[] {
 async function orgBalance() {
 	return (await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.creditsRemaining;
 }
+
+test.each([false, true])('rescan counts preserve the caller batch and honor dryRun=%s', async (dryRun) => {
+	await seedChannelAndOrg(10);
+	await testDb().db.insert(comments).values({ id: 'c1', channelId: 'UC1', text: 'Pending human decision', publishedAt: '2024-01-01T00:00:00Z', status: 'restoring', decidedBy: 'human', restoreIntentId: 17 });
+	const first = holdDecision();
+	const decisions = [first, holdDecision({ comment: { ...first.comment, id: 'c2' } })];
+	const count = dryRun ? 2 : 1;
+	expect(await stageOrAuditDecisions('UC1', decisions, dryRun, { orgId: 'org-1', expected: IDENTITY,
+		rescan: { chargeScope: 'scan-1', scanStamp: 'scan-1' } })).toEqual({ acted: count, queued: count, stagedCount: count });
+	expect(decisions.map(decision => decision.comment.id)).toEqual(['c1', 'c2']);
+	expect(await testDb().db.select().from(comments).where(eq(comments.id, 'c1')).get()).toMatchObject({ status: 'restoring', restoreIntentId: 17, scanId: dryRun ? null : 'scan-1' });
+	expect((await testDb().db.select().from(moderationActions)).map(action => action.commentId)).toEqual(dryRun ? [] : ['c2']);
+	expect((await testDb().db.select().from(auditLog)).map(entry => entry.commentId)).toEqual(dryRun ? ['c1', 'c2'] : ['c2']);
+	expect(await orgBalance()).toBe(dryRun ? 10 : 9);
+});
 
 test('a rescan upserts the stored comment, re-pends its completed action, and charges under the scan id', async () => {
 	await seedChannelAndOrg(10);
@@ -243,8 +258,8 @@ test('300 billable decisions stage with a statement count independent of batch s
 
 	const small = await countDbStatements(testDb().db, () => stageDecisions('UC1', holdBatch(3, 'small'), { orgId: 'org-1', expected: IDENTITY }));
 	const large = await countDbStatements(testDb().db, () => stageDecisions('UC1', holdBatch(300, 'large'), { orgId: 'org-1', expected: IDENTITY }));
-	expect(small.value).toBeUndefined();
-	expect(large.value).toBeUndefined();
+	expect(small.value).toEqual({ acted: 3, queued: 3, stagedCount: 3 });
+	expect(large.value).toEqual({ acted: 300, queued: 300, stagedCount: 300 });
 	// 10 statements: the metered classification now rides on the org row the
 	// charge transaction already reads (codeant) — the extra orgIsMetered
 	// select outside the tx is gone.

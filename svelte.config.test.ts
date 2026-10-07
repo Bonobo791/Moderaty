@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { compile } from 'svelte/compiler';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 // svelte.config.js reads process.env.MODERATY_ADAPTER at import time. Each
@@ -38,5 +40,22 @@ describe('svelte.config.js adapter selection', () => {
 	it('fails loudly on any other value — a build must never silently pick a target', async () => {
 		vi.stubEnv('MODERATY_ADAPTER', 'vercel');
 		await expect(loadConfig('unrecognized')).rejects.toThrow(/Unknown MODERATY_ADAPTER=vercel/);
+	});
+});
+
+describe('published component comments', () => {
+	it.each(['server', 'client'] as const)('omits shared developer notes from the %s output', async (generate) => {
+		const config = await loadConfig(`comments-${generate}`);
+		const filename = new URL('./src/lib/components/landing/Reveal.svelte', import.meta.url);
+		const { js } = compile(readFileSync(filename, 'utf8'), {
+			...config.compilerOptions,
+			runes: config.compilerOptions.runes({ filename: filename.pathname }),
+			filename: filename.pathname,
+			generate,
+			dev: false
+		});
+		expect(js.code).not.toContain('Scroll reveal: fade');
+		expect(js.code).not.toContain('optional stagger');
+		expect(js.code).toContain('reveal');
 	});
 });

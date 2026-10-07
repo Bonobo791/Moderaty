@@ -19,9 +19,8 @@ export default {
 	compilerOptions: {
 		// Force runes mode for the project, except for libraries. Can be removed in Svelte 6.
 		runes: ({ filename }) => filename.split(/[/\\]/).includes('node_modules') ? undefined : true,
-		// Keep the direction-contract HTML comment in the root layout auditable
-		// in the production build (impeccable new-work contract).
-		preserveComments: true
+		// Developer notes belong in source, not repeated in published HTML.
+		preserveComments: false
 	},
 	kit: {
 		adapter: useNode ? adapterNode() : adapterNetlify()

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Netlify build gate: runs the database migration (drizzle-kit migrate) and
+// Netlify build gate: runs the database migration (scripts/db-migrate.mjs) and
 // then the schema verification (scripts/verify-migrations.mjs) at the START
 // of every Netlify build, so a deploy is blocked until the database the
 // deploy will serve is actually migrated and verified — never serving new
@@ -17,7 +17,7 @@
 // binary already running this script) with a fixed, repo-absolute script
 // path — nothing is resolved through PATH (javascript:S4036), so an attacker
 // who can write to a PATH directory can never redirect the migration or the
-// verification to their own code. The MODERATY_DRIZZLE_KIT_BIN /
+// verification to their own code. The MODERATY_MIGRATE_BIN /
 // MODERATY_VERIFY_BIN / MODERATY_PREFLIGHT_BIN env overrides exist ONLY for
 // the test suite to substitute fake scripts — they are honored solely when
 // MODERATY_MIGRATE_TEST_HOOKS=1, so a stray or injected production env var
@@ -25,7 +25,7 @@
 // uses the defaults below.
 //
 // Runs only from the netlify.toml build command; it needs the per-context
-// Netlify env vars (TURSO_DATABASE_URL / TURSO_AUTH_TOKEN), which drizzle-kit
+// Netlify env vars (TURSO_DATABASE_URL / TURSO_AUTH_TOKEN), which the migrator
 // and the verification script read from the environment.
 
 import { spawnSync } from 'node:child_process';
@@ -65,7 +65,7 @@ if (!databaseUrl) {
 			'    may lack BuildKit secret support (it then silently falls back to build args) — check\n' +
 			'    "docker build --help | grep secret" on the server.\n' +
 			'  - Local: source .env (node --env-file=.env scripts/netlify-migrate.mjs).' +
-			'\nblocking the deploy — a build without the credentials must never reach drizzle-kit.'
+			'\nblocking the deploy — a build without the credentials must never reach the migration runner.'
 	);
 	process.exit(1);
 }
@@ -92,9 +92,9 @@ const override = (envName, fallback) => {
 	return fallback;
 };
 
-// db:preflight runs first because drizzle-kit exits 1 with no output on
-// connection failures — the preflight surfaces the real driver error (expired
-// token, unreachable host) into the deploy log before anything can swallow it.
+// db:preflight proves connectivity and write access before applying SQL. The
+// migration runner also reports SQL/driver errors that drizzle-kit's progress
+// renderer previously swallowed, without bypassing the verification gate.
 const steps = [
 	{
 		name: 'db:preflight',
@@ -102,7 +102,7 @@ const steps = [
 	},
 	{
 		name: 'db:migrate',
-		args: [override('MODERATY_DRIZZLE_KIT_BIN', join(repoRoot, 'node_modules', 'drizzle-kit', 'bin.cjs')), 'migrate']
+		args: [override('MODERATY_MIGRATE_BIN', join(repoRoot, 'scripts', 'db-migrate.mjs'))]
 	},
 	{
 		name: 'db:verify',

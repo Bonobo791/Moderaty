@@ -46,38 +46,38 @@ function contentsTracking(height = 1600, documentHeight = 5000) {
 	};
 }
 
-test('the final section becomes current at the scroll limit even below the heading threshold', () => {
-	const contents = contentsTracking();
-	contents.scroll(3400);
-	expect(contents.state.activeId).toBe('final');
-	contents.scroll(3398);
-	expect(contents.state.activeId).toBe('middle');
-	contents.scroll(400);
-	expect(contents.state.activeId).toBe('first');
-	contents.cleanup();
-});
+const trackingCases: {
+	name: string;
+	height?: number;
+	documentHeight?: number;
+	steps: [number, string][];
+}[] = [
+	{
+		name: 'selects the final section at the scroll limit, then tracks upward scrolling',
+		steps: [[3400, 'final'], [3398, 'middle'], [400, 'first']]
+	},
+	{
+		name: 'preserves the 112px heading threshold during normal scrolling',
+		steps: [[2887, 'first'], [2888, 'middle'], [400, 'first']]
+	},
+	{
+		name: 'selects the final section within a fractional pixel of the scroll limit',
+		steps: [[3399.5, 'final']]
+	},
+	{
+		name: 'does not select the final section on an unscrollable page',
+		height: 5000,
+		documentHeight: 5000,
+		steps: [[0, '']]
+	}
+];
 
-test('normal scrolling selects the last heading past the threshold and updates when scrolling upward', () => {
-	const contents = contentsTracking();
+test.each(trackingCases)('$name', ({ height, documentHeight, steps }) => {
+	const contents = contentsTracking(height, documentHeight);
 	expect(contents.state.activeId).toBe('');
-	contents.scroll(2887);
-	expect(contents.state.activeId).toBe('first');
-	contents.scroll(2888);
-	expect(contents.state.activeId).toBe('middle');
-	contents.scroll(400);
-	expect(contents.state.activeId).toBe('first');
-	contents.cleanup();
-});
-
-test('a fractional pixel at the scroll limit still selects the final section', () => {
-	const contents = contentsTracking();
-	contents.scroll(3399.5);
-	expect(contents.state.activeId).toBe('final');
-	contents.cleanup();
-});
-
-test('a document without a scrollable viewport does not select the final section on load', () => {
-	const contents = contentsTracking(5000, 5000);
-	expect(contents.state.activeId).toBe('');
+	for (const [top, expected] of steps) {
+		contents.scroll(top);
+		expect(contents.state.activeId).toBe(expected);
+	}
 	contents.cleanup();
 });

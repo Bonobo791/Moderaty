@@ -2,6 +2,11 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'vitest';
 
 describe('app shell', () => {
+	test('app.html does not publish developer comments on every page', () => {
+		const html = readFileSync(new URL('./app.html', import.meta.url), 'utf8');
+		expect(html).not.toMatch(/<!--[\s\S]*?-->/);
+	});
+
 	test('app.html declares a default <title> so every page has a document title', () => {
 		// sonarcloud Web:PageWithoutTitleCheck (MAJOR, reliability): the shell
 		// shipped without a <title>, so pages that do not set one via

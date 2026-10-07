@@ -1,6 +1,6 @@
-// Behavior tests for netlify-migrate.mjs. The real drizzle-kit bin, the
+// Behavior tests for netlify-migrate.mjs. The real migration runner, the
 // real verification script, and the real database preflight are replaced via
-// the script's documented test-only seams (MODERATY_DRIZZLE_KIT_BIN /
+// the script's documented test-only seams (MODERATY_MIGRATE_BIN /
 // MODERATY_VERIFY_BIN / MODERATY_PREFLIGHT_BIN) with fake node scripts that
 // record every invocation and can be told to fail, so the gate's own logic —
 // the CONTEXT decision, run order, and loud failure propagation — is exercised
@@ -26,13 +26,13 @@ afterAll(() => {
 	rmSync(tmp, { recursive: true, force: true });
 });
 
-// The fake drizzle-kit bin: records the invocation, fails when told to.
-const fakeDrizzle = join(tmp, 'fake-drizzle-kit.cjs');
+// The fake migration runner: records the invocation, fails when told to.
+const fakeMigration = join(tmp, 'fake-migration.cjs');
 writeFileSync(
-	fakeDrizzle,
+	fakeMigration,
 	`require('node:fs').appendFileSync(process.env.GATE_LOG, 'db:migrate\\n');
 if (process.env.GATE_FAIL === 'migrate') {
-  console.error('fake drizzle-kit: migrate failed');
+  console.error('fake migration: migrate failed');
   process.exit(1);
 }
 `
@@ -68,7 +68,7 @@ function runGate(env) {
 			...process.env,
 			GATE_LOG: gateLog,
 			MODERATY_MIGRATE_TEST_HOOKS: '1',
-			MODERATY_DRIZZLE_KIT_BIN: fakeDrizzle,
+			MODERATY_MIGRATE_BIN: fakeMigration,
 			MODERATY_VERIFY_BIN: fakeVerify,
 			MODERATY_PREFLIGHT_BIN: fakePreflight,
 			// Preflight needs database credentials; explicit `env` overrides win.
@@ -113,7 +113,7 @@ describe('netlify-migrate', () => {
 		expect(logLines()).toEqual(['db:preflight', 'db:migrate', 'db:verify']);
 	});
 
-	it('blocks the build loudly when db:preflight fails, surfacing the real error and never invoking drizzle-kit', async () => {
+	it('blocks the build loudly when db:preflight fails, surfacing the real error and never invoking migration', async () => {
 		// 2026-09-17 Coolify dev deploy: an expired TURSO_AUTH_TOKEN made Turso
 		// answer 401, drizzle-kit swallowed the error and exited 1 silently —
 		// the deploy log showed only a spinner. The preflight runs first so the
@@ -216,7 +216,7 @@ describe('netlify-migrate', () => {
 			expect(logLines()).toEqual([]);
 			const stderr = `${error.stderr ?? ''}`;
 			expect(stderr).toContain('ignoring MODERATY_PREFLIGHT_BIN');
-			expect(stderr).toContain('ignoring MODERATY_DRIZZLE_KIT_BIN');
+			expect(stderr).toContain('ignoring MODERATY_MIGRATE_BIN');
 			expect(stderr).toContain('ignoring MODERATY_VERIFY_BIN');
 			expect(stderr).toContain('db:preflight failed');
 		}

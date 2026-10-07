@@ -42,6 +42,8 @@ re-evaluate on the next `dev → main` merge.
 
 ## Product features
 
+- [ ] Open all external links in a new tab with `target="_blank"` and
+      `rel="noopener noreferrer"`.
 - [x] Contact page with company name and email — implemented in
       `src/routes/contact/` and covered by route/server tests.
 - [x] Add manual cost calculators to the homepage and Pricing page; users can

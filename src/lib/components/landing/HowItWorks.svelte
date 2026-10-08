@@ -18,7 +18,7 @@
 
 <section id="how-it-works" class="section">
 	<Reveal>
-		<h2 class="section-title">Three things happen to every comment. None of them involve you.</h2>
+		<h2 class="section-title">Rules, AI scoring, and review work together.</h2>
 	</Reveal>
 
 	<div class="steps">
@@ -26,10 +26,10 @@
 			<div class="step-text">
 				<h3 class="step-title">Your rules fire first.</h3>
 				<p class="step-body">
-					Write your norms in plain English: keywords, patterns, people. Every new comment meets
-					your rules before anything else touches it, and a rule hit acts immediately: hold it,
-					reject it, delete it, or ban the author. Your regexes are validated for safety before
-					they ever compile, so a pattern can never be turned against the app itself.
+					Protected handles skip rules and AI. Your rules run first on the remaining top-level
+					comments in each background batch. A matching rule selects hold, reject, delete, or ban;
+					Moderaty records the decision before sending the action to YouTube. Use keywords,
+					patterns, or blocked users. Unsafe regex patterns are rejected when you save them.
 				</p>
 			</div>
 			{@render terminal('rules.txt', rules)}
@@ -39,10 +39,12 @@
 			<div class="step-text">
 				<h3 class="step-title">The AI scores what your rules miss.</h3>
 				<p class="step-body">
-					Everything your rules don't catch is screened for prompt-injection tricks, then
-					scored by OpenAI's moderation model across 13 toxicity categories. The highest score
-					decides. If the AI can't score a comment, it lands in your queue: never auto-approved,
-					never auto-rejected.
+					With a usable OpenAI key and, on metered plans, available credits, remaining comments
+					are screened for prompt-injection tricks, then scored across 13 toxicity categories.
+					The highest score decides. If screening flags a comment or AI scoring fails, it lands
+					in your queue: never auto-approved, never auto-rejected. When metered credits run out,
+					AI scoring pauses while rules and protected handles continue. Lifetime teams need
+					their own usable OpenAI key.
 				</p>
 			</div>
 			{@render terminal('score ladder', ladder)}
@@ -54,7 +56,8 @@
 				<p class="step-body">
 					Borderline comments wait in your review queue: one click to approve, reject, delete, or
 					ban. Moderation intent is saved before changes reach YouTube, and completed actions
-					appear in your audit log. Interrupted actions are retried safely. Each channel gets 1 free moderation dry run and 1 free feedback dry run. Neither spends credits. Moderation previews drain the selected window in the background; feedback previews cover the first page, up to 100 comments.
+					appear in your audit log. Queued comments may remain public until their hold is confirmed
+					on YouTube. Interrupted actions are retried safely. Each channel gets 1 free moderation dry run and 1 free feedback dry run. Neither spends credits. Moderation previews drain the selected window in the background; feedback previews cover the first page, up to 100 comments.
 				</p>
 			</div>
 			{@render terminal('audit.log', audit)}

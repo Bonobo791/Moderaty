@@ -14,7 +14,7 @@
 
 <section class="section">
 	<Reveal>
-		<h2 class="section-title">Three ways to never read it.</h2>
+		<h2 class="section-title">Three ways to use Moderaty.</h2>
 	</Reveal>
 	<div class="plans">
 		<Reveal>

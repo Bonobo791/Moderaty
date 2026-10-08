@@ -12,32 +12,32 @@
 			<Icon name="sun-horizon" size={28} />
 			<div class="numerals">
 				<span class="numeral">47</span>
-				<span class="numeral-label">in overnight</span>
-				<span class="numeral mint">0</span>
-				<span class="numeral-label">read by you</span>
+				<span class="numeral-label">example comments</span>
+				<span class="numeral mint">6</span>
+				<span class="numeral-label">queued for review</span>
 			</div>
 			<h3 class="chunk-title">Your mornings.</h3>
 			<p class="chunk-body">
-				47 comments arrived last night. 0 required you. The pile is handled before it becomes your
-				day. You check the queue when you choose to, not when the badge number guilts you into it.
+				An illustrative batch: 47 top-level comments, 6 queued for review. Your rules and AI
+				scoring handle decisions where they can; uncertain results still need you. Check the
+				queue and channel status to see what needs attention.
 			</p>
 		</Reveal>
 		<div class="stack">
 			<Reveal class="chunk" delay={0.1}>
 				<Icon name="users-three" size={28} />
-				<h3 class="chunk-title">A comment section that stays yours at 10,000.</h3>
+				<h3 class="chunk-title">Your rules as your channel grows.</h3>
 				<p class="chunk-body">
-					Growth usually means losing your comment culture to whoever shows up loudest. Your norms
-					get enforced the same way on comment #10 and comment #10,000, including the night a video
-					blows up and the brigade arrives.
+					Moderaty applies your rules to scanned top-level comments in background batches.
+					Larger backlogs take additional checks. Paused channels and failed checks need attention.
 				</p>
 			</Reveal>
 			<Reveal class="chunk" delay={0.15}>
 				<Icon name="handshake" size={28} />
-				<h3 class="chunk-title">Sponsor-safe, without the read.</h3>
+				<h3 class="chunk-title">Decisions you can check.</h3>
 				<p class="chunk-body">
-					Brands audit comment sections before they sign. Yours stays clean, and you didn't pay for
-					it with your own evening.
+					Use the audit log to see recorded decisions and completed actions. A queued decision
+					can still need review, and a comment may remain public until its hold is confirmed.
 				</p>
 			</Reveal>
 		</div>

@@ -1,21 +1,21 @@
 export type FaqEntry = { q: string; a: string };
 
 /**
- * The 8 landing-page Q&As. Single source for both the visible FAQ
+ * The landing-page Q&As. Single source for both the visible FAQ
  * accordion and the FAQPage JSON-LD in +page.svelte — keep them verbatim.
  */
 export const FAQ_ENTRIES: FaqEntry[] = [
 	{
 		q: 'What is Moderaty?',
-		a: "Moderaty is comment protection for YouTube creators. It reads every new comment on every channel you connect, enforces your rules instantly, scores the rest with AI across 13 toxicity categories, and holds anything borderline for your one-click review. It's source-available and free to self-host under the PolyForm Shield license."
+		a: "Moderaty checks published top-level comments on connected, active YouTube channels in background batches. Protected handles skip rules and AI. Your rules run before AI screening and scoring; uncertain results and scoring failures go to your review queue. Replies and a separate sweep of YouTube's held-for-review or spam queues are outside the current scanning scope. Live chat is also outside this scope. It's source-available and free to self-host under PolyForm Shield License 1.0.0, subject to its commercial restrictions."
 	},
 	{
 		q: 'Will Moderaty ban my real fans?',
-		a: 'Not by default. Your rules act first: a ban rule bans on the spot, whatever the AI would have scored. Without a rule, only comments scoring 0.95 or higher on the AI\'s toxicity analysis trigger an automatic ban; the stricter tone analysis only ever hides a comment, never bans. Anything uncertain waits in your review queue for a one-click decision, and every action is logged in your audit trail.'
+		a: 'Not by default. Protected handles skip rules and AI. For other scanned comments, a matching ban rule bans without an AI score once YouTube confirms the action. Without a rule, only comments scoring 0.95 or higher on the AI\'s toxicity analysis trigger an automatic ban; the stricter tone analysis only ever hides a comment, never bans. Anything uncertain waits in your review queue for a one-click decision, and every action is logged in your audit trail.'
 	},
 	{
 		q: "What happens when the AI isn't sure about a comment?",
-		a: "It goes to your queue. If the AI can't score a comment at all, the comment is held for you, never auto-approved and never auto-rejected."
+		a: "It goes to your review queue. If the AI can't score a comment at all, it is queued for you, never auto-approved and never auto-rejected. Queued comments may remain public on YouTube until their hold is confirmed."
 	},
 	{
 		q: 'Does Moderaty reply to comments or post anything?',
@@ -23,11 +23,11 @@ export const FAQ_ENTRIES: FaqEntry[] = [
 	},
 	{
 		q: 'What is the feedback digest?',
-		a: 'An opt-in report per channel that groups your comments into what keeps coming up: recurring questions, substantive criticism, corrections, and requests. A theme is listed only once enough comments raise it (2 to 10, your threshold). Abusive wording stays concealed inside the digest, which is read-only: it never replies, never posts, and never changes a comment\'s moderation. Run it weekly, every 100 new comments, or only when you ask, and scan back up to 24 months of history. On metered plans each comment it classifies costs one credit, the same as AI scoring.'
+		a: 'An opt-in report per channel that groups scanned top-level comments into what keeps coming up: recurring questions, substantive criticism, corrections, and requests. A theme is listed only once enough comments raise it (2 to 10, your threshold). Abusive wording stays concealed inside the digest, which is read-only: it never replies, never posts, and never changes a comment\'s moderation. Run it weekly, every 100 new comments, or only when you ask, and scan back up to 24 months of history. On metered plans each comment it classifies costs one credit, the same as AI scoring.'
 	},
 	{
 		q: 'Can Moderaty clean up comments that are already there?',
-		a: 'Yes. Analyze history re-decides up to 24 months of backlog with the same rules and AI: hold, reject, delete, or ban, exactly as it would on a new comment, drained in background batches. It is a moderation run, so it needs credits or a plan. For read-only insight instead, the feedback digest\'s own history scan covers the same windows and touches nothing.'
+		a: 'Yes, for published top-level comments. Analyze history re-decides comments in a selected 1, 3, 6, 12, or 24-month window with the same rules and AI: hold, reject, delete, or ban, drained in background batches. It is a moderation run and can change comments on YouTube. The feedback digest\'s own history scan covers the same windows and is read-only. Starting either live history scan requires a positive credit balance or, for lifetime teams, a usable OpenAI key. Replies and separate sweeps of YouTube-held or spam comments are outside both scans.'
 	},
 	{
 		q: 'Can my team help moderate?',
@@ -43,7 +43,7 @@ export const FAQ_ENTRIES: FaqEntry[] = [
 	},
 	{
 		q: 'How is Moderaty different from CommentShark or YouTube Studio?',
-		a: 'YouTube Studio flags comments but leaves you to read and act on them. CommentShark automates engagement, including AI replies. Moderaty does one job: enforce your norms so you never have to read the hate.'
+		a: 'YouTube Studio flags comments but leaves you to read and act on them. CommentShark automates engagement, including AI replies. Moderaty focuses on protection: your rules and AI scoring help moderate published top-level comments, with uncertain decisions left for your review.'
 	},
 	{
 		q: 'Can I test Moderaty without changing anything on my channel?',

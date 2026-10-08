@@ -52,7 +52,9 @@
 <section id="moderation" class="card">
 	<h2>Moderation and sensitivity</h2>
 	<p>
-		Moderaty scans new comments on connected, active channels. Protected handles are checked first,
+		Moderaty scans published top-level comments on connected, active channels in background batches.
+		Replies and a separate sweep of comments held or classified as spam by YouTube are outside
+		the current scanning scope. Live chat is also outside this scope. Protected handles are checked first,
 		then your rules. Comments that need AI scoring are screened for possible prompt-injection
 		attacks; flagged comments go to the review queue without moderation scoring. AI scoring
 		failures and uncertain results also go to review rather than being automatically approved or rejected.

@@ -19,7 +19,7 @@
 				</p>
 				<p>
 					If you want AI to reply to your fans, use CommentShark. It's good at that. If you want
-					to never read the hate, use us.
+					help moderating harmful top-level comments with your rules and a review queue, use us.
 				</p>
 			</div>
 		</Reveal>

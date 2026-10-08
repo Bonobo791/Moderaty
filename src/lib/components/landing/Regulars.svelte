@@ -36,7 +36,7 @@
 			name: 'The Crypto Bot',
 			quote: '"I made $8,412 in 3 days thanks to..."',
 			body: "No you didn't, Chad.",
-			verdict: 'DELETED ON SIGHT',
+			verdict: 'DELETED BY A RULE',
 			verdictClass: 'v-ban',
 			rotateClass: 'rot-neg-2'
 		},
@@ -44,7 +44,7 @@
 			name: 'The Brigadier',
 			quote: '"Coming from the drama video. L + ratio +"',
 			body: 'Arrives four minutes after the video drops. Three hundred friends behind him.',
-			verdict: 'HELD UNTIL THE MOB GETS BORED',
+			verdict: 'HELD FOR REVIEW',
 			verdictClass: 'v-amber',
 			offset: true,
 			rotateClass: 'rot-1'
@@ -55,7 +55,7 @@
 <section id="regulars" class="section">
 	<Reveal>
 		<h2 class="section-title">Meet the regulars.</h2>
-		<p class="section-sub">Every comment section has them. Yours just stops hosting them.</p>
+		<p class="section-sub">Illustrative comments and possible decisions. Your rules and AI scores determine the outcome.</p>
 	</Reveal>
 
 	<div class="collage">
@@ -79,8 +79,8 @@
 
 	<Reveal delay={0.1}>
 		<p class="closing">
-			Different comments, different consequences. That's the point: hold the annoying, delete the
-			spam, ban the hateful, and never ask you to read any of it first.
+			Your rules can select hold, reject, delete, or ban for scanned top-level comments.
+			Uncertain AI decisions still need your review; a hold is effective when YouTube confirms it.
 		</p>
 	</Reveal>
 </section>

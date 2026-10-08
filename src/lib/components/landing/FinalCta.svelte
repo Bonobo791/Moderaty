@@ -6,7 +6,7 @@
 <section class="final-cta">
 	<div class="inner">
 		<Reveal>
-			<h2 class="title">Never read another <span class="marker">hate comment.</span></h2>
+			<h2 class="title">Protect your <span class="marker">comment section.</span></h2>
 		</Reveal>
 		<Reveal delay={0.08}>
 			<a href={LOGIN_URL} data-moderaty-event="connect_click" data-moderaty-placement="final_cta" class="btn-press cta">Connect YouTube channel</a>

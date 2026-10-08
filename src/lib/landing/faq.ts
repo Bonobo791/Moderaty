@@ -7,7 +7,7 @@ export type FaqEntry = { q: string; a: string };
 const FAQ_COPY: [question: string, answer: string][] = [
 	[
 		'What is Moderaty?',
-		"Moderaty checks published top-level comments on connected, active YouTube channels in background batches. Protected handles skip rules and AI. Your rules run before AI screening and scoring; uncertain results and scoring failures go to your review queue. Replies and a separate sweep of YouTube's held-for-review or spam queues are outside the current scanning scope. Live chat is also outside this scope. It's source-available and free to self-host under PolyForm Shield License 1.0.0, subject to its commercial restrictions."
+		"Moderaty checks published top-level comments on connected, active YouTube channels in background batches. Protected handles skip rules and AI. Your rules run before AI screening and scoring; uncertain results and scoring failures go to your review queue. If a check runs out of time, unfinished comments retry on a later check instead. Replies and a separate sweep of YouTube's held-for-review or spam queues are outside the current scanning scope. Live chat is also outside this scope. It's source-available and free to self-host under PolyForm Shield License 1.0.0, subject to its commercial restrictions."
 	],
 	[
 		'Will Moderaty ban my real fans?',
@@ -15,7 +15,7 @@ const FAQ_COPY: [question: string, answer: string][] = [
 	],
 	[
 		"What happens when the AI isn't sure about a comment?",
-		"It goes to your review queue. If the AI can't score a comment at all, it is queued for you, never auto-approved and never auto-rejected. Queued comments may remain public on YouTube until their hold is confirmed."
+		"It goes to your review queue. If the AI can't score a comment at all, it is queued for you, never auto-approved and never auto-rejected. If a check runs out of time, unfinished comments retry on a later check instead. Queued comments may remain public on YouTube until their hold is confirmed."
 	],
 	[
 		'Does Moderaty reply to comments or post anything?',
@@ -27,7 +27,7 @@ const FAQ_COPY: [question: string, answer: string][] = [
 	],
 	[
 		'Can Moderaty clean up comments that are already there?',
-		'Yes, for published top-level comments. Analyze history re-decides comments in a selected 1, 3, 6, 12, or 24-month window with the same rules and AI: hold, reject, delete, or ban, drained in background batches. It is a moderation run and can change comments on YouTube. The feedback digest\'s own history scan covers the same windows and is read-only. Starting either live history scan requires a positive credit balance or, for lifetime teams, a usable OpenAI key. Replies and separate sweeps of YouTube-held or spam comments are outside both scans.'
+		'Yes, for published top-level comments. Analyze history re-decides comments in a selected 1, 3, 6, 12, or 24-month window with the same rules and AI: hold, reject, delete, or ban, drained in background batches. It is a moderation run and can change comments on YouTube. The feedback digest\'s own history scan covers the same windows and is read-only. Starting either live history scan requires purchased credits, available paid subscription allowance, or, for lifetime teams, a usable OpenAI key. Replies and separate sweeps of YouTube-held or spam comments are outside both scans.'
 	],
 	[
 		'Can my team help moderate?',

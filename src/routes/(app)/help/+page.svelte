@@ -329,7 +329,8 @@
 		<li><strong>Out of credits:</strong> ask an owner to add credits on Usage; lifetime owners should check their OpenAI key on Team.</li>
 		<li><strong>Quota or timeout failure:</strong> read the status message. Moderaty retries unfinished work on later scheduled checks.</li>
 		<li>
-			<strong>AI scoring failure:</strong> affected comments are stored in the review queue and are
+			<strong>AI scoring failure:</strong> except when a check runs out of time, affected comments
+			are stored in the review queue and are
 			not automatically scored again on later normal checks. Review and resolve them manually
 			in Review queue.
 		</li>

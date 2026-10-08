@@ -42,7 +42,8 @@
 					With a usable OpenAI key and, on metered plans, available credits, remaining comments
 					are screened for prompt-injection tricks, then scored across 13 toxicity categories.
 					The highest score decides. If screening flags a comment or AI scoring fails, it lands
-					in your queue: never auto-approved, never auto-rejected. When metered credits run out,
+					in your queue: never auto-approved, never auto-rejected. If a check runs out of time,
+					unfinished comments retry on a later check instead. When metered credits run out,
 					AI scoring pauses while rules and protected handles continue. Lifetime teams need
 					their own usable OpenAI key.
 				</p>

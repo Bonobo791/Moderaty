@@ -33,7 +33,8 @@ decisions to a human review queue.
   rules do not decide — screened for prompt injection first, with flagged
   comments held for human review.
 - Routes AI failures and borderline scores to a human review queue instead of
-  silently approving or rejecting them.
+  silently approving or rejecting them. If a check runs out of time, unfinished
+  comments retry on a later check instead.
 - Records decisions in an audit log and supports `DRY_RUN=true` previews.
 
 Scanning covers published top-level comments on connected, active channels.
@@ -41,7 +42,8 @@ Replies, live chat, and separate sweeps of YouTube's held-for-review or spam
 queues are outside the current scanning scope. History scans use the same
 retrieval path, with 1, 3, 6, 12, or 24-month windows. Moderation history can apply
 actions; feedback history is read-only. Starting either live history scan requires
-a positive credit balance or, for lifetime teams, a usable OpenAI key.
+purchased credits, available paid subscription allowance, or, for lifetime teams,
+a usable OpenAI key.
 
 Each scheduled run is bounded and checkpointed. It processes one eligible
 channel and up to 100 top-level comments per page, records enforcement work in

@@ -72,6 +72,7 @@
 	.numerals {
 		margin-top: 24px;
 		display: flex;
+		flex-wrap: wrap;
 		align-items: flex-end;
 		gap: 12px;
 	}

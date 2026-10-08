@@ -7,7 +7,7 @@
 		path: string;
 		origin: string;
 		article?: boolean;
-		author?: string;
+		author?: { name: string; path: string };
 	} = $props();
 
 	let image = $derived(new URL('/og.png', origin).href);
@@ -16,7 +16,7 @@
 		'@context': 'https://schema.org',
 		'@type': article ? 'BlogPosting' : 'CollectionPage',
 		...(article ? { headline: title, mainEntityOfPage: canonical } : { name: title }),
-		...(article && author ? { author: { '@type': 'Person', name: author } } : {}),
+		...(article && author ? { author: { '@type': 'Organization', name: author.name, url: new URL(author.path, origin).href } } : {}),
 		description,
 		url: canonical,
 		inLanguage: 'en'

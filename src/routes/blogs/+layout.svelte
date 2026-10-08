@@ -44,6 +44,7 @@
 		margin: 48px 0 20px;
 		scroll-margin-top: 96px;
 	}
+	.blog-content :global(h3[id]) { scroll-margin-top: 96px; }
 	.blog-content :global(p) { margin: 0 0 24px; }
 	.blog-content :global(a) {
 		color: var(--paper);

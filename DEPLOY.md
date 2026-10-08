@@ -32,6 +32,13 @@ execute untrusted PR code that must never run SQL against a shared database.
 The manual `npm run db:migrate` below remains for initial DB setup (before
 the site exists), local work, and outage recovery.
 
+`npm run db:migrate` and the deploy gate use `scripts/db-migrate.mjs`, which
+calls the Drizzle ORM migrator and reports database errors, nested causes,
+and the batch statement index when available. If preflight passes but migration
+fails, use that error to diagnose the SQL or schema problem. The former
+drizzle-kit progress renderer hid these errors behind an exit code. Keep
+`db:verify` enabled and leave applied migration files unchanged.
+
 - Create the production Turso database and note its URL and auth token.
 - Apply migrations once from a checkout with the production values sourced:
   `npm run db:migrate` (loads `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN`).

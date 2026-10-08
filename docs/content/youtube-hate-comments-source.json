@@ -1,58 +1,45 @@
 {
 	"library_file_id": "libfile_b6384591060c819199f6b74cf3d87c65",
-	"file_id": "file_00000000154881fa88534381485d7b0b",
-	"version_id": "1",
+	"file_id": "file_00000000b9a0820e9084760f5ad49848",
+	"version_id": "6",
 	"filename": "Moderaty_Hate_Comments_Example_Article.docx",
-	"source_size_bytes_reported_by_library": 42948,
+	"source_size_bytes_reported_by_library": 41572,
+	"source_sha256": "e398f4bcabc8fbead2d83fad96955c0bf03712e2ffaee042f529c860db55ae3a",
 	"extraction": {
-		"route": "Authorized Library full-text read",
-		"date": "2026-10-06",
-		"start_line": 1,
-		"end_line": 154,
-		"total_lines": 154,
-		"has_more": false,
-		"next_read": null,
-		"pages": [
+		"route": "Verified local DOCX version 6; paragraph/table text and original hyperlink relationships",
+		"date": "2026-10-08",
+		"complete": true,
+		"body_pages": [
 			1,
 			2,
 			3,
 			4
-		],
-		"warnings": [],
-		"sha256_of_content_joined_with_newlines": "dcab789c5f5d19996012e1b8d2d3075f42abc47e7986e2d4419b407855087081"
-	},
-	"published_body_pages": [
-		1,
-		2,
-		3
-	],
-	"internal_editorial_notes_page": 4,
-	"metadata_source": "Title, H1, description and owning route from page 4; review status and draft dates are not publication metadata.",
-	"materialization": {
-		"status": "Blocked",
-		"error": "Workspace outbound proxy: Tunnel connection failed: 403 Forbidden",
-		"binary_verified": false,
-		"resolution": "User authorized complete Library full-text extraction for prose implementation; no additional download attempted."
-	},
-	"citations": {
-		"original_docx_hyperlink_targets": "Not included in Library text extraction",
-		"resolution": "Matched source-register subjects to live primary documentation and verified relevant passages on 2026-10-06.",
-		"youtube_help_answer_ids": [
-			"9483359",
-			"9482556",
-			"15535966",
-			"9482361",
-			"9482367",
-			"2802027",
-			"2802268"
-		],
-		"moderaty_source": "https://moderaty.com/#faq",
-		"repository_checks": [
-			"src/lib/landing/faq.ts",
-			"src/lib/server/dryRun.ts",
-			"src/lib/server/pipeline/decisions.ts"
 		]
 	},
+	"editorial_notes_location": "MC-1 task comments; none included in article",
+	"metadata_source": "Established owner and title/description; named organizational author matches the byline and final bio. No invented publication dates or personal credentials.",
+	"citations": {
+		"inline_link_relationships_verified": true,
+		"primary_source_review_date": "2026-10-07",
+		"youtube_help_answer_ids": [
+			"9483359",
+			"2802268",
+			"15535966",
+			"9482361",
+			"2802027",
+			"142443",
+			"9482556"
+		],
+		"youtube_ai_moderation_announcement": {
+			"url": "https://blog.youtube/news-and-events/made-on-youtube-new-tools-power-creation-journey/",
+			"published": "2026-09-23",
+			"status": "Opt-in test; channel availability qualified"
+		},
+		"moderaty_source": "https://moderaty.com/#faq",
+		"source_age": "Current undated official documentation supports platform facts. Six-month recency prioritization is not an all-citations publication-date gate."
+	},
 	"implementation_route": "/blogs/how-to-deal-with-hate-comments-on-youtube/",
-	"live_youtube_control_test": "Not performed; documented steps verified against official help pages."
+	"compatibility": "Preserved existing action, criticism, reply, remove/hide, reduction and preview anchors; report-harassment and channel-rules retained as subsection anchors.",
+	"live_youtube_control_test": "Not performed; documented steps verified against official help pages.",
+	"release_status": "Prepared revision; human review and merge required."
 }

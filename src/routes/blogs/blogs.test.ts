@@ -8,7 +8,7 @@ const pageData = { locale: 'en' as const, siteOrigin: 'https://moderaty.com' };
 test('the article renders its decision table, precise controls, and fictional-example labels', async () => {
 	const Article = (await import('./how-to-deal-with-hate-comments-on-youtube/+page.svelte')).default;
 	const { body, head } = render(Article, { props: { data: pageData } });
-	for (const text of ['These invented examples', 'None comes from a real viewer or creator.', 'Community', 'Published', 'Remove', 'Hide from channel', 'one free moderation dry run', 'Deleted comments cannot be restored']) {
+	for (const text of ['These fictional examples', 'They are not quotes from real viewers.', 'YouTube Studio', 'Remove', 'Hide from channel', 'free moderation dry run', 'Deleted comments cannot be restored']) {
 		expect(body).toContain(text);
 	}
 	expect(body).toMatch(/<caption[^>]*>/);
@@ -19,7 +19,8 @@ test('the article renders its decision table, precise controls, and fictional-ex
 	expect(head).toContain(`rel="canonical" href="https://moderaty.com${path}"`);
 	const data = JSON.parse(head.match(/<script type="application\/ld\+json">(.*?)<\/script>/s)![1]);
 	expect(data).toMatchObject({ '@type': 'BlogPosting', headline: title, url: `https://moderaty.com${path}`, inLanguage: 'en' });
-	for (const field of ['author', 'datePublished', 'dateModified', 'reviewedBy', 'lastReviewed']) expect(data).not.toHaveProperty(field);
+	expect(data.author).toEqual({ '@type': 'Organization', name: 'Moderaty', url: 'https://moderaty.com/' });
+	for (const field of ['datePublished', 'dateModified', 'reviewedBy', 'lastReviewed']) expect(data).not.toHaveProperty(field);
 });
 
 test('the index links to both owning article routes', async () => {
@@ -55,3 +56,32 @@ test.each(['https://moderaty.com', 'https://selfhost.example', 'http://localhost
 		}
 	}
 );
+
+test('the reviewed article has a summary, linked takeaways, FAQs, and the named author bio at the end', async () => {
+	const Article = (await import('./how-to-deal-with-hate-comments-on-youtube/+page.svelte')).default;
+	const { body } = render(Article, { props: { data: pageData } });
+	const clean = body.replaceAll('<!---->', '');
+	expect(clean.match(/<h1\b/g)).toHaveLength(1);
+	expect(clean).toMatch(/By <a[^>]*href="#about-the-author"[^>]*>Moderaty<\/a>/);
+	expect(clean.indexOf('id="summary"')).toBeLessThan(clean.indexOf('id="choose-an-action"'));
+	const takeaways = clean.match(/<ul\b[^>]*aria-label="Key takeaways"[^>]*>(.*?)<\/ul>/s)![1];
+	expect([...takeaways.matchAll(/<li\b/g)]).toHaveLength(4);
+	const ids = new Set([...clean.matchAll(/\bid="([^"]+)"/g)].map(([, id]) => id));
+	for (const [, id] of takeaways.matchAll(/href="#([^"]+)"/g)) expect(ids.has(id)).toBe(true);
+	const faq = clean.slice(clean.indexOf('<h2 id="frequently-asked-questions"'), clean.indexOf('<h2 id="about-the-author"'));
+	expect(faq.match(/<h3\b/g)).toHaveLength(4);
+	expect(clean).toMatch(/<h2 id="about-the-author"[^>]*>About the author<\/h2>\s*<p[^>]*>.*?Moderaty.*?builds tools.*?<\/p>\s*<\/article>/s);
+	expect(clean).not.toMatch(/Editorial review notes|Primary source register|Source-date correction/i);
+});
+
+test('external citations open safely and the privacy claim links directly to its process', async () => {
+	const Article = (await import('./how-to-deal-with-hate-comments-on-youtube/+page.svelte')).default;
+	const { body } = render(Article, { props: { data: pageData } });
+	const external = [...body.matchAll(/<a\b([^>]*href="https?:[^>]+)>/g)];
+	expect(external.length).toBeGreaterThan(0);
+	for (const [, attrs] of external) {
+		expect(attrs).toContain('target="_blank"');
+		expect(attrs).toMatch(/rel="[^"]*\bnoopener\b/);
+	}
+	expect(body).toContain('href="https://support.google.com/youtube/answer/142443"');
+});

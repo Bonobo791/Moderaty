@@ -1,0 +1,182 @@
+{
+	"scope": "Local adapter-node revision; no production deployment or live YouTube control test",
+	"source_version": "6",
+	"viewports": [
+		{
+			"width": 320,
+			"page_overflow": false,
+			"source_blocks_match": true,
+			"heading_structure": true,
+			"external_sources_safe": true,
+			"table_scrollable": true,
+			"anchors": [
+				{
+					"id": "report-harassment",
+					"headingTop": 96.265625,
+					"navBottom": 65,
+					"scrollMargin": "96px"
+				},
+				{
+					"id": "channel-rules",
+					"headingTop": 96.09375,
+					"navBottom": 65,
+					"scrollMargin": "96px"
+				}
+			],
+			"browser_errors": []
+		},
+		{
+			"width": 390,
+			"page_overflow": false,
+			"source_blocks_match": true,
+			"heading_structure": true,
+			"external_sources_safe": true,
+			"table_scrollable": true,
+			"anchors": [
+				{
+					"id": "report-harassment",
+					"headingTop": 95.96875,
+					"navBottom": 65,
+					"scrollMargin": "96px"
+				},
+				{
+					"id": "channel-rules",
+					"headingTop": 95.609375,
+					"navBottom": 65,
+					"scrollMargin": "96px"
+				}
+			],
+			"browser_errors": []
+		},
+		{
+			"width": 768,
+			"page_overflow": false,
+			"source_blocks_match": true,
+			"heading_structure": true,
+			"external_sources_safe": true,
+			"table_scrollable": false,
+			"anchors": [
+				{
+					"id": "report-harassment",
+					"headingTop": 96.28125,
+					"navBottom": 65,
+					"scrollMargin": "96px"
+				},
+				{
+					"id": "channel-rules",
+					"headingTop": 96.1875,
+					"navBottom": 65,
+					"scrollMargin": "96px"
+				}
+			],
+			"browser_errors": []
+		},
+		{
+			"width": 1152,
+			"page_overflow": false,
+			"source_blocks_match": true,
+			"heading_structure": true,
+			"external_sources_safe": true,
+			"table_scrollable": false,
+			"anchors": [
+				{
+					"id": "report-harassment",
+					"headingTop": 96.3125,
+					"navBottom": 65,
+					"scrollMargin": "96px"
+				},
+				{
+					"id": "channel-rules",
+					"headingTop": 96.21875,
+					"navBottom": 65,
+					"scrollMargin": "96px"
+				}
+			],
+			"browser_errors": []
+		},
+		{
+			"width": 1440,
+			"page_overflow": false,
+			"source_blocks_match": true,
+			"heading_structure": true,
+			"external_sources_safe": true,
+			"table_scrollable": false,
+			"anchors": [
+				{
+					"id": "report-harassment",
+					"headingTop": 96.3125,
+					"navBottom": 65,
+					"scrollMargin": "96px"
+				},
+				{
+					"id": "channel-rules",
+					"headingTop": 96.21875,
+					"navBottom": 65,
+					"scrollMargin": "96px"
+				}
+			],
+			"browser_errors": []
+		}
+	],
+	"routes": {
+		"/blogs/how-to-deal-with-hate-comments-on-youtube/": 200,
+		"/blogs/": 200,
+		"/": 200,
+		"/robots.txt": 200,
+		"/sitemap.xml": 200,
+		"/llms.txt": 200
+	},
+	"cta": "Moderaty free dry run link reaches the existing homepage FAQ; no sign-in or moderation action performed",
+	"date_utc": "2026-10-08",
+	"author_and_metadata": {
+		"byline": "Moderaty",
+		"bio_location": "Final article paragraph, after FAQs",
+		"schema_author": "Organization, Moderaty; matches visible copy",
+		"canonical": "Configured site origin plus established owning route",
+		"public_article_noindex": false
+	},
+	"source_text_match": {
+		"docx_version": "6",
+		"ordered_blocks": 69,
+		"all_match": true,
+		"additional_web_elements": "Accessible table caption, byline bio link, and two H3 subsection labels preserving old fragment destinations"
+	},
+	"check": {
+		"command": "npm run check",
+		"errors": 0,
+		"warnings": 0,
+		"exit_code": 0
+	},
+	"build": {
+		"command": "MODERATY_ADAPTER=node npm run build",
+		"exit_code": 0
+	},
+	"tests": {
+		"command": "npm run test",
+		"files_passed": 204,
+		"tests_passed": 4006,
+		"exit_code": 0
+	},
+	"regression_proof": {
+		"test": "src/routes/blogs/contents.test.ts: preserved H3 deep links have a scroll offset larger than the fixed navigation",
+		"before": "Failed: compiled CSS provided no H3 scroll offset.",
+		"after": "Passed: 96px H3 offset exceeds the 64px navigation; browser checks place both preserved targets below the navigation at all five widths."
+	},
+	"visual_review": {
+		"widths": [
+			390,
+			1440
+		],
+		"reviewed": [
+			"Title/byline/summary/takeaways",
+			"Decision table and scrolling region",
+			"Moderation software and preview limits",
+			"FAQs and final bio"
+		],
+		"result": "No content clipping, page overflow or broken table observed."
+	},
+	"keyboard_check": "At 320px, the focused table region scrolls horizontally with ArrowRight; mobile contents collapses after following a link.",
+	"browser_runtime": "Chromium 141 through Playwright; standalone verification tooling only, no project dependencies changed. Test font configuration pointed to existing local fonts.",
+	"database_scope": "Only a disposable local SQLite file was used. Article/index rendering is independent of its database. Homepage FAQ was reachable; its database guard logged empty-fixture warnings. No authenticated or database-backed workflow was tested.",
+	"live_youtube_control_test": "Not performed; factual instructions were checked against current official documentation."
+}

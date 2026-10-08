@@ -22,12 +22,13 @@ test('the article renders its decision table, precise controls, and fictional-ex
 	for (const field of ['author', 'datePublished', 'dateModified', 'reviewedBy', 'lastReviewed']) expect(data).not.toHaveProperty(field);
 });
 
-test('the index links to the single owning route', async () => {
+test('the index links to both owning article routes', async () => {
 	const Index = (await import('./+page.svelte')).default;
 	const { body, head } = render(Index, { props: { data: pageData } });
 	expect(body).toContain(`href="${path}"`);
 	expect(body).toContain(title);
-	expect(body.match(/<h2/g)).toHaveLength(1);
+	expect(body).toContain('href="/blogs/how-to-stop-spam-and-scam-comments-on-youtube/"');
+	expect(body.match(/<h2/g)).toHaveLength(2);
 	expect(head).toContain('rel="canonical" href="https://moderaty.com/blogs/"');
 	expect(body).not.toContain('/guides/');
 });

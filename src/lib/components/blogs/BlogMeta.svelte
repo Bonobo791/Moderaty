@@ -1,12 +1,13 @@
 <script lang="ts">
 	import { jsonLd } from '$lib/landing/json-ld';
 
-	let { title, description, path, origin, article = false }: {
+	let { title, description, path, origin, article = false, author }: {
 		title: string;
 		description: string;
 		path: string;
 		origin: string;
 		article?: boolean;
+		author?: string;
 	} = $props();
 
 	let image = $derived(new URL('/og.png', origin).href);
@@ -15,6 +16,7 @@
 		'@context': 'https://schema.org',
 		'@type': article ? 'BlogPosting' : 'CollectionPage',
 		...(article ? { headline: title, mainEntityOfPage: canonical } : { name: title }),
+		...(article && author ? { author: { '@type': 'Person', name: author } } : {}),
 		description,
 		url: canonical,
 		inLanguage: 'en'

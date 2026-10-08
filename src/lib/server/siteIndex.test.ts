@@ -29,8 +29,8 @@ const PRIVATE_PATHS = [
 	'/usage'
 ];
 
-test('the blog index and single article each have one sitemap entry and stay indexable', () => {
-	for (const path of ['/blogs/', '/blogs/how-to-deal-with-hate-comments-on-youtube/']) {
+test('the blog index and articles each have one sitemap entry and stay indexable', () => {
+	for (const path of ['/blogs/', '/blogs/how-to-deal-with-hate-comments-on-youtube/', '/blogs/how-to-stop-spam-and-scam-comments-on-youtube/']) {
 		expect(sitemapXml().split(`<loc>https://moderaty.example${path}</loc>`)).toHaveLength(2);
 		expect(isNoIndexRoute(path.replace(/\/$/, ''))).toBe(false);
 	}

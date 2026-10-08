@@ -41,7 +41,7 @@ function makeEvent() {
 	};
 }
 
-test.each(['/blogs', '/blogs/how-to-deal-with-hate-comments-on-youtube'])(
+test.each(['/blogs', '/blogs/how-to-deal-with-hate-comments-on-youtube', '/blogs/how-to-stop-spam-and-scam-comments-on-youtube'])(
 	'public blog %s stays available without database migrations or a valid session',
 	async (routeId) => {
 		mocks.assertMigrationsCurrent.mockImplementation(async () => error(503, 'Migrations pending'));

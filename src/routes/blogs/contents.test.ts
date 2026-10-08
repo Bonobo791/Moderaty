@@ -1,4 +1,6 @@
 import { render } from 'svelte/server';
+import { compile } from 'svelte/compiler';
+import { readFileSync } from 'node:fs';
 import { expect, test } from 'vitest';
 import Article from './how-to-deal-with-hate-comments-on-youtube/+page.svelte';
 
@@ -16,7 +18,7 @@ test('both contents views link to every article heading in reading order', () =>
 	const body = article();
 	const headings = [...body.matchAll(/<h2\b[^>]*id="([^"]+)"[^>]*>(.*?)<\/h2>/gs)]
 		.map(([, id, label]) => ({ id, label: withoutSvelteMarkers(label) }));
-	expect(headings).toHaveLength(8);
+	expect(headings).toHaveLength(10);
 	expect(new Set(headings.map(({ id }) => id)).size).toBe(headings.length);
 	const menus = [...body.matchAll(/<nav\b[^>]*aria-label="On this page"[^>]*>(.*?)<\/nav>/gs)];
 	expect(menus).toHaveLength(2);
@@ -38,6 +40,17 @@ test('mobile contents is a native, initially collapsed disclosure below the arti
 
 test('section targets can receive keyboard focus after following a contents link', () => {
 	const headings = [...article().matchAll(/<h2\b([^>]*)>/g)];
-	expect(headings).toHaveLength(8);
+	expect(headings).toHaveLength(10);
 	for (const [, attributes] of headings) expect(attributes).toContain('tabindex="-1"');
+});
+
+
+test('preserved H3 deep links have a scroll offset larger than the fixed navigation', () => {
+	const source = readFileSync(new URL('./+layout.svelte', import.meta.url), 'utf8');
+	const css = compile(source, { generate: 'server' }).css!.code;
+	const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)];
+	const h3Offset = rules.filter(([, selector]) => selector.includes('h3[id]'))
+		.map(([, , declarations]) => Number.parseFloat(declarations.match(/scroll-margin-top:\s*([\d.]+)px/)?.[1] ?? '0'));
+	expect(h3Offset.length).toBeGreaterThan(0);
+	expect(Math.max(...h3Offset)).toBeGreaterThan(64);
 });

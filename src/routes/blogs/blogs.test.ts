@@ -3,6 +3,8 @@ import { expect, test } from 'vitest';
 
 const path = '/blogs/how-to-deal-with-hate-comments-on-youtube/';
 const title = 'How to deal with hate comments on YouTube';
+const author = 'Andrew Philip Weilbacher';
+const authorBio = 'Andrew Philip Weilbacher is the founder of Moderaty and a YouTube Creator.';
 const pageData = { locale: 'en' as const, siteOrigin: 'https://moderaty.com' };
 
 test('the article renders its decision table, precise controls, and fictional-example labels', async () => {
@@ -19,7 +21,7 @@ test('the article renders its decision table, precise controls, and fictional-ex
 	expect(head).toContain(`rel="canonical" href="https://moderaty.com${path}"`);
 	const data = JSON.parse(head.match(/<script type="application\/ld\+json">(.*?)<\/script>/s)![1]);
 	expect(data).toMatchObject({ '@type': 'BlogPosting', headline: title, url: `https://moderaty.com${path}`, inLanguage: 'en' });
-	expect(data.author).toEqual({ '@type': 'Organization', name: 'Moderaty', url: 'https://moderaty.com/' });
+	expect(data.author).toEqual({ '@type': 'Person', name: author });
 	for (const field of ['datePublished', 'dateModified', 'reviewedBy', 'lastReviewed']) expect(data).not.toHaveProperty(field);
 });
 
@@ -39,7 +41,8 @@ test.each(['https://moderaty.com', 'https://selfhost.example', 'http://localhost
 	async (siteOrigin) => {
 		const pages = [
 			[(await import('./+page.svelte')).default, '/blogs/'],
-			[(await import('./how-to-deal-with-hate-comments-on-youtube/+page.svelte')).default, path]
+			[(await import('./how-to-deal-with-hate-comments-on-youtube/+page.svelte')).default, path],
+			[(await import('./how-to-stop-spam-and-scam-comments-on-youtube/+page.svelte')).default, '/blogs/how-to-stop-spam-and-scam-comments-on-youtube/']
 		] as const;
 		for (const [Page, pagePath] of pages) {
 			const { head } = render(Page, { props: { data: { ...pageData, siteOrigin } } });
@@ -51,7 +54,10 @@ test.each(['https://moderaty.com', 'https://selfhost.example', 'http://localhost
 			expect(head).toContain(`name="twitter:image" content="${image}"`);
 			const schema = JSON.parse(head.match(/<script type="application\/ld\+json">(.*?)<\/script>/s)![1]);
 			expect(schema.url).toBe(canonical);
-			if (schema['@type'] === 'BlogPosting') expect(schema.mainEntityOfPage).toBe(canonical);
+			if (schema['@type'] === 'BlogPosting') {
+				expect(schema.mainEntityOfPage).toBe(canonical);
+				expect(schema.author).toEqual({ '@type': 'Person', name: author });
+			}
 			if (siteOrigin !== pageData.siteOrigin) expect(head).not.toContain('https://moderaty.com');
 		}
 	}
@@ -62,7 +68,7 @@ test('the reviewed article has a summary, linked takeaways, FAQs, and the named 
 	const { body } = render(Article, { props: { data: pageData } });
 	const clean = body.replaceAll('<!---->', '');
 	expect(clean.match(/<h1\b/g)).toHaveLength(1);
-	expect(clean).toMatch(/By <a[^>]*href="#about-the-author"[^>]*>Moderaty<\/a>/);
+	expect(clean).toMatch(/By <a[^>]*href="#about-the-author"[^>]*>Andrew Philip Weilbacher<\/a>/);
 	expect(clean.indexOf('id="summary"')).toBeLessThan(clean.indexOf('id="choose-an-action"'));
 	const takeaways = clean.match(/<ul\b[^>]*aria-label="Key takeaways"[^>]*>(.*?)<\/ul>/s)![1];
 	expect([...takeaways.matchAll(/<li\b/g)]).toHaveLength(4);
@@ -70,7 +76,8 @@ test('the reviewed article has a summary, linked takeaways, FAQs, and the named 
 	for (const [, id] of takeaways.matchAll(/href="#([^"]+)"/g)) expect(ids.has(id)).toBe(true);
 	const faq = clean.slice(clean.indexOf('<h2 id="frequently-asked-questions"'), clean.indexOf('<h2 id="about-the-author"'));
 	expect(faq.match(/<h3\b/g)).toHaveLength(4);
-	expect(clean).toMatch(/<h2 id="about-the-author"[^>]*>About the author<\/h2>\s*<p[^>]*>.*?Moderaty.*?builds tools.*?<\/p>\s*<\/article>/s);
+	const finalBio = clean.match(/<h2 id="about-the-author"[^>]*>About the author<\/h2>\s*<p[^>]*>(.*?)<\/p>\s*<\/article>/s)?.[1];
+	expect(finalBio).toBe(authorBio);
 	expect(clean).not.toMatch(/Editorial review notes|Primary source register|Source-date correction/i);
 });
 

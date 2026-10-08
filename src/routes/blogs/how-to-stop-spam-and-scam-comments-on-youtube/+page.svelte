@@ -1,23 +1,23 @@
 <script lang="ts">
 	import BlogMeta from '$lib/components/blogs/BlogMeta.svelte';
 	import ArticleContents from '$lib/components/blogs/ArticleContents.svelte';
+	import { BLOG_AUTHOR } from '$lib/blogs/author';
 	import { HATE_COMMENTS } from '$lib/blogs/hate-comments';
 	import { SPAM_COMMENTS, SPAM_COMMENT_SECTIONS, SPAM_RULE_EXAMPLES } from '$lib/blogs/spam-comments';
 	import type { PageData } from './$types';
 	let { data }: { data: PageData } = $props();
-	const author = 'Andrew Philip Weilbacher';
 	const impersonationPolicy = 'https://support.google.com/youtube/answer/2801947?hl=en';
 	const spamPolicy = 'https://support.google.com/youtube/answer/2801973?hl=en';
 </script>
 
-<BlogMeta {...SPAM_COMMENTS} origin={data.siteOrigin} article {author} />
+<BlogMeta {...SPAM_COMMENTS} origin={data.siteOrigin} article />
 
 <nav class="breadcrumbs" aria-label="Breadcrumb">
 	<ol><li><a href="/">Home</a></li><li><a href="/blogs/">Blogs</a></li><li aria-current="page">Spam and scam comments</li></ol>
 </nav>
 <article class="blog-article">
 	<h1>{SPAM_COMMENTS.title}</h1>
-	<p class="byline">By <a href="#author">{author}</a></p>
+	<p class="byline">By <a href="#author">{BLOG_AUTHOR.name}</a></p>
 	<p>To stop spam and scam comments on your YouTube channel, start with YouTube’s comment filters and review queue. Hold links and recurring scam phrases, remove deceptive comments, and report impersonators. Add narrow custom rules for patterns that keep returning, then check the matches for legitimate comments before choosing stronger actions.</p>
 	<section aria-labelledby="takeaways">
 		<h2 id="takeaways">Key Takeaways</h2>
@@ -116,7 +116,7 @@
 
 	<section id="author" aria-labelledby="author-heading">
 		<h2 id="author-heading">About the author</h2>
-		<p>{author} is the data protection officer named in <a href="/terms#s21">Moderaty’s Terms of Service</a>. This guide explains comment controls and rule review for independent YouTube creators.</p>
+		<p>{BLOG_AUTHOR.bio}</p>
 	</section>
 </article>
 

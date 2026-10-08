@@ -1,13 +1,13 @@
 <script lang="ts">
+	import { BLOG_AUTHOR } from '$lib/blogs/author';
 	import { jsonLd } from '$lib/landing/json-ld';
 
-	let { title, description, path, origin, article = false, author }: {
+	let { title, description, path, origin, article = false }: {
 		title: string;
 		description: string;
 		path: string;
 		origin: string;
 		article?: boolean;
-		author?: string | { name: string; path: string };
 	} = $props();
 
 	let image = $derived(new URL('/og.png', origin).href);
@@ -16,9 +16,7 @@
 		'@context': 'https://schema.org',
 		'@type': article ? 'BlogPosting' : 'CollectionPage',
 		...(article ? { headline: title, mainEntityOfPage: canonical } : { name: title }),
-		...(article && author ? { author: typeof author === 'string'
-			? { '@type': 'Person', name: author }
-			: { '@type': 'Organization', name: author.name, url: new URL(author.path, origin).href } } : {}),
+		...(article ? { author: { '@type': 'Person', name: BLOG_AUTHOR.name } } : {}),
 		description,
 		url: canonical,
 		inLanguage: 'en'

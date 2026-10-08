@@ -1,8 +1,7 @@
 export const HATE_COMMENTS = {
 	path: '/blogs/how-to-deal-with-hate-comments-on-youtube/',
 	title: 'How to deal with hate comments on YouTube',
-	description: 'Decide when to ignore, reply, remove, hide or report YouTube comments. Keep useful criticism and reduce the abuse you have to read.',
-	author: { name: 'Moderaty', path: '/' }
+	description: 'Decide when to ignore, reply, remove, hide or report YouTube comments. Keep useful criticism and reduce the abuse you have to read.'
 } as const;
 
 export const HATE_COMMENT_SECTIONS = {

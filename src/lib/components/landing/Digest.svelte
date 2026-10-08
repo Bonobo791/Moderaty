@@ -19,7 +19,7 @@
 			<h2 class="section-title">The good ones get a digest.</h2>
 			<p class="body">
 				Not every comment is hate; some are the reason you make videos. Switch on the feedback
-				digest and Moderaty groups them into what keeps coming up: recurring questions,
+				digest and Moderaty groups scanned top-level comments into recurring questions,
 				substantive criticism, corrections, requests. A theme earns a row only when enough
 				comments raise it; one-offs are counted, never listed.
 			</p>

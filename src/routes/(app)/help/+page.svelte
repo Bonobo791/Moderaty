@@ -52,7 +52,9 @@
 <section id="moderation" class="card">
 	<h2>Moderation and sensitivity</h2>
 	<p>
-		Moderaty scans new comments on connected, active channels. Protected handles are checked first,
+		Moderaty scans published top-level comments on connected, active channels in background batches.
+		Replies and a separate sweep of comments held or classified as spam by YouTube are outside
+		the current scanning scope. Live chat is also outside this scope. Protected handles are checked first,
 		then your rules. Comments that need AI scoring are screened for possible prompt-injection
 		attacks; flagged comments go to the review queue without moderation scoring. AI scoring
 		failures and uncertain results also go to review rather than being automatically approved or rejected.
@@ -327,7 +329,8 @@
 		<li><strong>Out of credits:</strong> ask an owner to add credits on Usage; lifetime owners should check their OpenAI key on Team.</li>
 		<li><strong>Quota or timeout failure:</strong> read the status message. Moderaty retries unfinished work on later scheduled checks.</li>
 		<li>
-			<strong>AI scoring failure:</strong> affected comments are stored in the review queue and are
+			<strong>AI scoring failure:</strong> except when a check runs out of time, affected comments
+			are stored in the review queue and are
 			not automatically scored again on later normal checks. Review and resolve them manually
 			in Review queue.
 		</li>

@@ -11,12 +11,12 @@
 				<p class="eyebrow"><span class="eyebrow-mark">{'//'}</span> Comment protection for YouTube creators</p>
 			</Reveal>
 			<Reveal amount={0.1} delay={0.08}>
-				<h1>Never read another <span class="marker">hate comment.</span></h1>
+				<h1>Protect your <span class="marker">comment section.</span></h1>
 			</Reveal>
 			<Reveal amount={0.1} delay={0.16}>
 				<p class="sub">
-					Moderaty reads every comment so you don't have to. Your norms, enforced while you sleep.
-					Trolls get the hammer.
+					Moderaty checks new top-level comments on connected channels. Your rules and AI scoring
+					help you handle abuse, with uncertain decisions queued for review.
 				</p>
 			</Reveal>
 			<Reveal amount={0.1} delay={0.24}>

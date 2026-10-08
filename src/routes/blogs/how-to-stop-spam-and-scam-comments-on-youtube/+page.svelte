@@ -1,7 +1,7 @@
 <script lang="ts">
 	import BlogMeta from '$lib/components/blogs/BlogMeta.svelte';
 	import ArticleContents from '$lib/components/blogs/ArticleContents.svelte';
-	import { COMMENT_SOURCES as sources, HATE_COMMENTS } from '$lib/blogs/hate-comments';
+	import { HATE_COMMENTS } from '$lib/blogs/hate-comments';
 	import { SPAM_COMMENTS, SPAM_COMMENT_SECTIONS, SPAM_RULE_EXAMPLES } from '$lib/blogs/spam-comments';
 	import type { PageData } from './$types';
 	let { data }: { data: PageData } = $props();
@@ -31,12 +31,12 @@
 	<ArticleContents headings={SPAM_COMMENT_SECTIONS} />
 
 	<h2 id="native-controls" tabindex="-1">Start with YouTube’s comment controls</h2>
-	<p>Open YouTube Studio, choose Community, and review Published and Held. <a href={sources.reply} target="_blank" rel="noopener noreferrer">YouTube’s review guide</a> explains these tabs. Inspect replies under your own comments too, since a deceptive reply can appear to be part of your conversation.</p>
-	<p><a href={sources.settings} target="_blank" rel="noopener noreferrer">YouTube offers Basic, Strict, and Hold all moderation.</a> Basic holds potentially inappropriate comments; Strict holds a broader range; Hold all requires approval before comments appear. Review what the filters catch.</p>
+	<p>Open YouTube Studio, choose Community, and review Published and Held. <a href="https://support.google.com/youtube/answer/9482367?hl=en&co=GENIE.Platform%3DDesktop" target="_blank" rel="noopener noreferrer">YouTube’s review guide</a> explains these tabs. Inspect replies under your own comments too, since a deceptive reply can appear to be part of your conversation.</p>
+	<p><a href="https://support.google.com/youtube/answer/9483359?hl=en" target="_blank" rel="noopener noreferrer">YouTube offers Basic, Strict, and Hold all moderation.</a> Basic holds potentially inappropriate comments; Strict holds a broader range; Hold all requires approval before comments appear. Review what the filters catch.</p>
 	<ol>
-		<li>For an existing video, open Content, select the video, then Show more. Adjust Comments and ratings and save. <a href={sources.changeSettings} target="_blank" rel="noopener noreferrer">Upload defaults apply to new videos and posts</a>; they do not update your older uploads.</li>
+		<li>For an existing video, open Content, select the video, then Show more. Adjust Comments and ratings and save. <a href="https://support.google.com/youtube/answer/9482556?hl=en&co=GENIE.Platform%3DDesktop" target="_blank" rel="noopener noreferrer">Upload defaults apply to new videos and posts</a>; they do not update your older uploads.</li>
 		<li>Open Settings, Community moderation, then Content controls. Turn on Link text to hold comments with hashtags and URLs. Add specific recurring phrases to Blocked words and save. Follow the current <a href="https://support.google.com/youtube/answer/16622701?hl=en&co=GENIE.Platform%3DDesktop" target="_blank" rel="noopener noreferrer">channel moderation settings instructions</a>.</li>
-		<li>Review the Held tab and approve legitimate comments. <a href={sources.settings} target="_blank" rel="noopener noreferrer">YouTube keeps held comments for up to 60 days.</a> Approved users bypass word and link filters; your own comments and moderators’ comments also bypass link blocking.</li>
+		<li>Review the Held tab and approve legitimate comments. <a href="https://support.google.com/youtube/answer/9483359?hl=en" target="_blank" rel="noopener noreferrer">YouTube keeps held comments for up to 60 days.</a> Approved users bypass word and link filters; your own comments and moderators’ comments also bypass link blocking.</li>
 	</ol>
 	<p>During a surge you cannot review, pause comments on the affected video. Existing comments remain; YouTube stops new ones until you turn comments back on. Use <a href="#false-positives">false-positive checks</a> as you tighten your settings.</p>
 
@@ -47,7 +47,7 @@
 
 	<h2 id="repeated-comments" tabindex="-1">Review repeated and copied messages</h2>
 	<p>Compare the message with the video and nearby discussion. Repeated praise can come from real viewers; repeated off-topic promotion or requests to exchange subscriptions need a different decision. <a href={spamPolicy} target="_blank" rel="noopener noreferrer">YouTube’s spam policy</a> covers high-volume repetitive or deceptive comments used to drive traffic or engagement, including sub-for-sub schemes.</p>
-	<p>Search Studio for a distinctive phrase and inspect the results. If you find the same unwanted solicitation across several videos, remove the comments and consider hiding that account. <a href={sources.hide} target="_blank" rel="noopener noreferrer">Hide from channel applies across your channel.</a> Check the account before acting; similar text alone does not prove that two viewers are the same person.</p>
+	<p>Search Studio for a distinctive phrase and inspect the results. If you find the same unwanted solicitation across several videos, remove the comments and consider hiding that account. <a href="https://support.google.com/youtube/answer/9482361?hl=en" target="_blank" rel="noopener noreferrer">Hide from channel applies across your channel.</a> Check the account before acting; similar text alone does not prove that two viewers are the same person.</p>
 	<p>A custom keyword rule can hold a recurring phrase. It matches the text of each comment; it does not count how often someone posted or detect duplicate campaigns. Keep a useful correction even if several viewers raise it. For insults or criticism, use the separate guide to <a href={HATE_COMMENTS.path}>dealing with hate comments on YouTube</a>.</p>
 
 	<h2 id="suspicious-links" tabindex="-1">Hold suspicious links for review</h2>
@@ -63,11 +63,11 @@
 	<h2 id="reporting" tabindex="-1">Report scams and impersonation</h2>
 	<ol>
 		<li>Save the comment link, the account’s channel URL, and a dated screenshot privately before clearing the comment. Redact personal details if you share evidence with someone helping you moderate.</li>
-		<li>On YouTube, open the comment’s three-dot menu, select Report, choose the reason that fits, and submit. You can also use Report spam or abuse in Studio. <a href={sources.report} target="_blank" rel="noopener noreferrer">YouTube reviews reports; reporting does not guarantee removal.</a></li>
+		<li>On YouTube, open the comment’s three-dot menu, select Report, choose the reason that fits, and submit. You can also use Report spam or abuse in Studio. <a href="https://support.google.com/youtube/answer/2802027?hl=en&co=GENIE.Platform%3DDesktop" target="_blank" rel="noopener noreferrer">YouTube reviews reports; reporting does not guarantee removal.</a></li>
 		<li>For an impersonating account, open its channel description, select …more, then Report user and follow the prompts. Use the <a href={impersonationPolicy} target="_blank" rel="noopener noreferrer">impersonation reporting route</a> as well as reporting the deceptive comment.</li>
 		<li>Remove the comment or hide the account when you need to protect your channel. Hiding and reporting have different scopes; you can do both. Do not ask your audience to confront the account.</li>
 	</ol>
-	<p>YouTube’s <a href={sources.moderate} target="_blank" rel="noopener noreferrer">moderation guide</a> distinguishes removing a comment, reporting spam or abuse, and hiding a user. Use those native reporting controls even if another tool handles your routine holds.</p>
+	<p>YouTube’s <a href="https://support.google.com/youtube/answer/15535966?hl=en&co=GENIE.Platform%3DDesktop" target="_blank" rel="noopener noreferrer">moderation guide</a> distinguishes removing a comment, reporting spam or abuse, and hiding a user. Use those native reporting controls even if another tool handles your routine holds.</p>
 
 	<h2 id="custom-rules" tabindex="-1">Test custom moderation rules</h2>
 	<p>Start with hold for review so you can inspect matches before making an irreversible choice. These invented examples were tested against Moderaty’s source rule matcher. They illustrate text matching, not scam-detection accuracy or results on a live channel.</p>
@@ -94,7 +94,7 @@
 		<li>“The calculation at 4:12 should use 2026 prices” contains numbers but does not match the phone example.</li>
 		<li>“Send a message to collect your prize” misses these rules. A non-match gives you no assurance that a comment is safe.</li>
 	</ul>
-	<p>Check the Held queue after changing native filters. <a href={sources.settings} target="_blank" rel="noopener noreferrer">YouTube acknowledges that its filters can make mistakes.</a> Approve legitimate comments and narrow phrases that keep catching useful discussion.</p>
+	<p>Check the Held queue after changing native filters. <a href="https://support.google.com/youtube/answer/9483359?hl=en" target="_blank" rel="noopener noreferrer">YouTube acknowledges that its filters can make mistakes.</a> Approve legitimate comments and narrow phrases that keep catching useful discussion.</p>
 	<p>Check Moderaty’s action status as well as its review queue. A pending decision can remain public until the YouTube hold succeeds. <a href="/terms#s9">Held and rejected comments can be restored from Moderaty’s audit log.</a> Deletions are permanent, and you cannot lift an author ban in Moderaty.</p>
 
 	<h2 id="preview-rules" tabindex="-1">Check the channel preview before broader use</h2>

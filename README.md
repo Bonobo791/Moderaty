@@ -1,8 +1,9 @@
 # Moderaty
 
-**Never read another hate comment.** Moderaty is an open-source YouTube comment
-protection platform for creators. It applies the creator's rules first, uses AI
-as a second opinion, and sends uncertain decisions to a human review queue.
+Moderaty is a source-available YouTube comment protection platform for creators,
+licensed under [PolyForm Shield License 1.0.0](LICENSE). It checks top-level
+comments on connected channels, applies your rules before AI, and sends uncertain
+decisions to a human review queue.
 
 [![Codacy Badge](https://app.codacy.com/project/badge/Grade/a971fb52cb6142efab9a17572f3e3f57)](https://app.codacy.com/gh/Bonobo791/Moderaty/dashboard?utm_source=github&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
 
@@ -25,18 +26,29 @@ as a second opinion, and sends uncertain decisions to a human review queue.
 ## What it does
 
 - Connects YouTube channels through Google OAuth.
+- Skips rules and AI for protected handles.
 - Matches top-level comments against keyword, regex, and blocked-user rules.
 - Applies `hold`, `reject`, `delete`, or `ban` actions to matching comments.
 - Uses OpenAI moderation and an optional per-channel tone pass for comments that
   rules do not decide — screened for prompt injection first, with flagged
   comments held for human review.
 - Routes AI failures and borderline scores to a human review queue instead of
-  silently approving or rejecting them.
+  silently approving or rejecting them. If a check runs out of time, unfinished
+  comments retry on a later check instead.
 - Records decisions in an audit log and supports `DRY_RUN=true` previews.
 
+Scanning covers published top-level comments on connected, active channels.
+Replies, live chat, and separate sweeps of YouTube's held-for-review or spam
+queues are outside the current scanning scope. History scans use the same
+retrieval path, with 1, 3, 6, 12, or 24-month windows. Moderation history can apply
+actions; feedback history is read-only. Starting either live history scan requires
+purchased credits, available paid subscription allowance, or, for lifetime teams,
+a usable OpenAI key.
+
 Each scheduled run is bounded and checkpointed. It processes one eligible
-channel, records enforcement work in the database before writing to YouTube,
-and reconciles unfinished actions on a later run.
+channel and up to 100 top-level comments per page, records enforcement work in
+the database before writing to YouTube, and reconciles unfinished actions on a
+later run.
 
 ## Repository overview
 

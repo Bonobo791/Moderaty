@@ -1,13 +1,87 @@
 import type { Handle, HandleServerError } from '@sveltejs/kit';
+import { randomUUID } from 'node:crypto';
 
-import { isHttpError } from '@sveltejs/kit';
-import { DrizzleQueryError } from 'drizzle-orm';
+import { isHttpError, isRedirect, json } from '@sveltejs/kit';
 
 import { cookieSecure } from '$lib/server/oauthState';
 import { LOCALE_COOKIE, isBilingualPath, resolveLocale } from '$lib/i18n/locale';
 import { assertMigrationsCurrent } from '$lib/server/migrationGuard';
 import { getSessionUser, SESSION_COOKIE } from '$lib/server/session';
 import { isNoIndexRoute, PUBLIC_BLOG_ROUTE_IDS } from '$lib/server/siteIndex';
+import { emitOperationalEvent } from '$lib/server/operationalEvents';
+import { escapeHtml } from '$lib/server/emailText';
+import errorPage from './error.html?raw';
+
+type Event = Parameters<Handle>[0]['event'];
+
+function correlate(response: Response, event: Event): Response {
+	// These conversions otherwise happen after handle() and discard custom
+	// headers. Preserve the same cache/redirect outcome before adding ours.
+	const etag = response.headers.get('etag');
+	const clientTag = event.request?.headers.get('if-none-match')?.replace(/^W\/(?=")/, '');
+	if (response.status === 200 && etag !== null && clientTag === etag) {
+		const cacheHeaders = ['etag', 'cache-control', 'content-location', 'date', 'expires', 'vary', 'set-cookie'];
+		const headers = new Headers(Array.from(response.headers).filter(([key]) => cacheHeaders.includes(key)));
+		// Preserve separate Set-Cookie fields rather than a comma-joined value.
+		headers.delete('set-cookie');
+		for (const cookie of response.headers.getSetCookie()) headers.append('set-cookie', cookie);
+		response = new Response(null, { status: 304, headers });
+	} else if (event.isDataRequest && response.status >= 300 && response.status <= 308) {
+		const location = response.headers.get('location');
+		if (location) {
+			const headers = new Headers(response.headers);
+			for (const key of ['location', 'content-type', 'content-length', 'content-encoding', 'etag']) headers.delete(key);
+			headers.set('cache-control', 'private, no-store');
+			response = json({ type: 'redirect', location }, { headers });
+		}
+	}
+	const headers = new Headers(response.headers);
+	headers.set('X-Request-ID', event.locals.requestId);
+	if (isNoIndexRoute(event.route.id)) headers.set('X-Robots-Tag', 'noindex');
+	return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
+function wantsJson(event: Event): boolean {
+	if (event.isDataRequest) return true;
+	const ranges = (event.request?.headers.get('accept') ?? 'text/html').split(',').map((part, order) => {
+		const [mediaValue, ...parameters] = part.trim().toLowerCase().split(';');
+		const media = mediaValue.trim();
+		const qualityParameter = parameters.find((value) => value.trim().startsWith('q='));
+		const quality = qualityParameter ? Number(qualityParameter.trim().slice(2)) : 1;
+		return { media, quality, order, specificity: media === '*/*' ? 0 : media.endsWith('/*') ? 1 : 2 };
+	}).filter(({ quality }) => Number.isFinite(quality) && quality > 0 && quality <= 1)
+		.toSorted((a, b) => b.quality - a.quality || b.specificity - a.specificity || a.order - b.order);
+	for (const { media } of ranges) {
+		if (['application/json', 'application/*', '*/*'].includes(media)) return true;
+		if (['text/html', 'text/*'].includes(media)) return false;
+	}
+	return false;
+}
+
+// Hook-thrown errors are rendered outside resolve() by SvelteKit, which drops
+// hook headers. Return controlled responses here so correlation survives too.
+export const handle: Handle = async (input) => {
+	const { event } = input;
+	event.locals.requestId = randomUUID();
+	try {
+		return correlate(await handleRequest(input), event);
+	} catch (failure) {
+		if (isRedirect(failure)) {
+			return correlate(new Response(null, { status: failure.status, headers: { location: failure.location } }), event);
+		}
+		const status = isHttpError(failure) ? failure.status : 500;
+		const body = isHttpError(failure) ? failure.body : await handleError({ error: failure, event, status, message: 'Internal Error' }) ?? { message: 'Internal Error' };
+		if (wantsJson(event)) {
+			return correlate(json(body, { status }), event);
+		}
+		const locale = isBilingualPath(event.url.pathname)
+			? resolveLocale({ cookie: event.cookies.get(LOCALE_COOKIE), acceptLanguage: event.request?.headers.get('accept-language') }) : 'en';
+		const html = errorPage.replace('<html lang="en">', `<html lang="${locale}">`)
+			.replaceAll('%sveltekit.status%', String(status))
+			.replaceAll('%sveltekit.error.message%', escapeHtml(body.message ?? 'Internal Error'));
+		return correlate(new Response(html, { status, headers: { 'content-type': 'text/html; charset=utf-8' } }), event);
+	}
+};
 
 // Resolves the session cookie into locals.user for every request. When the
 // session slid into its renewal window, the cookie is refreshed with the new
@@ -17,7 +91,7 @@ import { isNoIndexRoute, PUBLIC_BLOG_ROUTE_IDS } from '$lib/server/siteIndex';
 // the server, and the (app) layout/dashboard render a user-visible
 // maintenance overlay. A valid user sees a loud maintenance state, never a
 // silent downgrade to signed-out.
-export const handle: Handle = async ({ event, resolve }) => {
+const handleRequest: Handle = async ({ event, resolve }) => {
 	// The html lang must describe the actual content (MOD-11): the stored or
 	// browser preference only applies on fully translated surfaces — anywhere
 	// else the page is English and must say so.
@@ -37,19 +111,14 @@ export const handle: Handle = async ({ event, resolve }) => {
 	// auth-gated page, where a <meta> tag could never exist. robots.txt
 	// deliberately leaves these paths crawlable: a Disallow would hide the
 	// header and let bare URLs index anyway.
-	const respond = async (pending: Response | Promise<Response>) => {
-		const response = await pending;
-		if (isNoIndexRoute(event.route.id)) response.headers.set('X-Robots-Tag', 'noindex');
-		return response;
-	};
 	if (PUBLIC_BLOG_ROUTE_IDS.includes(event.route.id ?? '')) {
-		return respond(resolveLocalized());
+		return resolveLocalized();
 	}
 	// The health probe reports database health itself; public metadata and
 	// analytics configuration are independent of the schema and session.
 	// Bypassing the guard keeps them available during database outages.
 	if (['/api/health', '/api/analytics', '/robots.txt', '/sitemap.xml', '/llms.txt'].includes(event.route.id ?? '')) {
-		return respond(resolve(event));
+		return resolve(event);
 	}
 	// Deploy-ordering boundary (issue #81): if the database is behind the
 	// deployed code's migration journal, every DB query would fail with
@@ -65,10 +134,10 @@ export const handle: Handle = async ({ event, resolve }) => {
 		await assertMigrationsCurrent();
 	} catch (e) {
 		if (isHttpError(e)) throw e;
-		console.error('migration guard query failed:', e);
+		emitOperationalEvent({ type: 'migration_check_failed', severity: 'error', category: 'database', route: event.route.id, requestId: event.locals.requestId });
 		event.locals.dbDown = true;
 		event.locals.user = null;
-		return respond(resolveLocalized());
+		return resolveLocalized();
 	}
 	const token = event.cookies.get(SESSION_COOKIE);
 	try {
@@ -88,13 +157,12 @@ export const handle: Handle = async ({ event, resolve }) => {
 		// is NOT an outage: let it fail loudly instead of masking it as
 		// maintenance and signing the user out.
 		if (isHttpError(e)) throw e;
-		// Drizzle's wrapper includes bound parameters, including the session
-		// cookie. Keep the provider cause in the log without those credentials.
-		console.error('session lookup failed:', e instanceof DrizzleQueryError ? e.cause ?? 'database query failed' : e);
+		// Neither Drizzle's parameter wrapper nor the raw provider cause is safe.
+		emitOperationalEvent({ type: 'session_lookup_failed', severity: 'error', category: 'database', route: event.route.id, requestId: event.locals.requestId });
 		event.locals.dbDown = true;
 		event.locals.user = null;
 	}
-	return respond(resolveLocalized());
+	return resolveLocalized();
 };
 
 /**
@@ -108,26 +176,30 @@ export const handle: Handle = async ({ event, resolve }) => {
  * inside actions) on the error path: only a dead connection downgrades.
  * Redirects and deliberate HttpErrors never reach this hook.
  */
-export const handleError: HandleServerError = ({ error, event, status, message }) => {
-	const abortLike =
-		error !== null &&
-		typeof error === 'object' &&
-		((error as Error).message === 'aborted' ||
-			(error as Error).name === 'AbortError' ||
-			(error as { code?: string }).code === 'ECONNRESET');
-	if (event.request.signal.aborted && abortLike) {
-		console.warn(
-			'request aborted: %s %s — the client disconnected before a response could be sent',
-			event.request.method,
-			event.url.pathname
+function isAbortLike(error: unknown): boolean {
+	try {
+		return (
+			error !== null &&
+			typeof error === 'object' &&
+			((error as Error).message === 'aborted' ||
+				(error as Error).name === 'AbortError' ||
+				(error as { code?: string }).code === 'ECONNRESET')
 		);
+	} catch {
+		// Provider accessors are untrusted too. Keep the generic error category.
+		return false;
+	}
+}
+
+export const handleError: HandleServerError = ({ error, event, status, message }) => {
+	if (event.request.signal.aborted && isAbortLike(error)) {
+		emitOperationalEvent({ type: 'request_disconnected', severity: 'warn', category: 'client_disconnect', route: event.route.id, requestId: event.locals?.requestId });
 	} else if (status === 404) {
 		// Framework 404s (unmatched routes, missing data requests) land here as
-		// SvelteKitError — scanner noise, not a defect. The default logger prints
-		// just the request line for them; match that, at warn level.
-		console.warn('[%d] %s %s', status, event.request.method, event.url.pathname);
+		// SvelteKitError — scanner noise, not a defect. Keep at warn level.
+		emitOperationalEvent({ type: 'request_not_found', severity: 'warn', category: 'not_found', route: event.route.id, requestId: event.locals?.requestId });
 	} else {
-		console.error('[%d] %s %s', status, event.request.method, event.url.pathname, error);
+		emitOperationalEvent({ type: 'unexpected_server_error', severity: 'error', category: 'unexpected', route: event.route.id, requestId: event.locals?.requestId });
 	}
 	return { message };
 };

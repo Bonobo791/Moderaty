@@ -1,6 +1,7 @@
 import { error } from '@sveltejs/kit';
 import { env } from '$env/dynamic/private';
 import { HATE_COMMENTS } from '$lib/blogs/hate-comments';
+import { SPAM_COMMENTS } from '$lib/blogs/spam-comments';
 
 // The crawlable surface: marketing, legal, and the two public utility
 // pages. Everything else — the (app) console, OAuth/consent/invite/verify
@@ -15,11 +16,12 @@ export const PUBLIC_PAGES = [
 	'/terms',
 	'/dpa',
 	'/blogs/',
-	HATE_COMMENTS.path
+	HATE_COMMENTS.path,
+	SPAM_COMMENTS.path
 ] as const;
 
 // Runtime-rendered editorial pages need the configured origin, not a session or DB.
-export const PUBLIC_BLOG_ROUTE_IDS = ['/blogs', HATE_COMMENTS.path.slice(0, -1)];
+export const PUBLIC_BLOG_ROUTE_IDS = ['/blogs', HATE_COMMENTS.path.slice(0, -1), SPAM_COMMENTS.path.slice(0, -1)];
 
 // Route ids that must never appear in a search index: the authenticated
 // (app) console, single-use flow pages, and every API endpoint. Keyed on
@@ -109,6 +111,7 @@ export function llmsTxt(): string {
 		`- [Sign in](${link('/login')}) — Google sign-in`,
 		`- [Blogs](${link('/blogs/')}) — YouTube comment moderation advice`,
 		`- [${HATE_COMMENTS.title}](${link(HATE_COMMENTS.path)}) — choosing a response to hurtful comments`,
+		`- [${SPAM_COMMENTS.title}](${link(SPAM_COMMENTS.path)}) — native controls and review for recurring spam patterns`,
 		'',
 		'## Legal',
 		'',

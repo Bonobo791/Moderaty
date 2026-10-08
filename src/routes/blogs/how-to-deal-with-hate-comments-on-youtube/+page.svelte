@@ -1,6 +1,7 @@
 <script lang="ts">
 	import BlogMeta from '$lib/components/blogs/BlogMeta.svelte';
 	import ArticleContents from '$lib/components/blogs/ArticleContents.svelte';
+	import { BLOG_AUTHOR } from '$lib/blogs/author';
 	import { HATE_COMMENTS, HATE_COMMENT_SECTIONS as sections } from '$lib/blogs/hate-comments';
 	import type { PageData } from './$types';
 	let { data }: { data: PageData } = $props();
@@ -13,7 +14,7 @@
 </nav>
 <article class="blog-article">
 	<h1>{HATE_COMMENTS.title}</h1>
-	<p class="byline">By <a href="#about-the-author">{HATE_COMMENTS.author.name}</a></p>
+	<p class="byline">By <a href="#about-the-author">{BLOG_AUTHOR.name}</a></p>
 	<ArticleContents headings={Object.values(sections)} />
 
 	<h2 id={sections.summary.id} tabindex="-1">{sections.summary.title}</h2>
@@ -91,5 +92,5 @@
 	<p>Only if you can add something useful, such as a factual correction or a clear answer. You can remove or report abuse under your rules without debating the commenter.</p>
 
 	<h2 id={sections.author.id} tabindex="-1">{sections.author.title}</h2>
-	<p><a href="/">Moderaty</a> builds tools that help YouTube creators apply their comment rules and review uncertain decisions.</p>
+	<p>{BLOG_AUTHOR.bio}</p>
 </article>

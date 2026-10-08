@@ -11,6 +11,8 @@ test('spam guide renders its answer, safe examples, qualified preview route, and
 	}
 	for (const rule of SPAM_RULE_EXAMPLES) expect(body).toContain(rule.pattern);
 	for (const text of ['Key Takeaways', 'About the author', 'Andrew Philip Weilbacher', 'one free moderation dry-run attempt', 'published top-level comments', 'does not verify a hosted channel run']) expect(body).toContain(text);
+	expect(body).toMatch(/By <a[^>]*href="#author"[^>]*>Andrew Philip Weilbacher<\/a>/);
+	expect(body).toContain('Andrew Philip Weilbacher is the founder of Moderaty and a YouTube Creator.');
 	expect(body).toContain('href="/login"');
 	expect(body).not.toMatch(/href="https?:\/\/example\.invalid|MC-21|Editorial review notes|\/guides\//);
 	expect(body.match(/scope="row"/g)).toHaveLength(4);

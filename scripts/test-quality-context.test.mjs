@@ -95,6 +95,8 @@ test('the introduction workflow runs its pinned collector even when the base has
 	const workflow = readFileSync(new URL('../.github/workflows/test-quality-sentinel.md', import.meta.url), 'utf8');
 	expect(workflow).toMatch(/max-stack: -1/);
 	expect(workflow).toContain('model: copilot/gpt-5.4');
+	expect(workflow).not.toContain('copilot-requests: write');
+	expect(readFileSync(new URL('../.github/workflows/test-quality-sentinel.lock.yml', import.meta.url), 'utf8')).toContain('secrets.COPILOT_GITHUB_TOKEN');
 	expect(readFileSync(new URL('../.github/workflows/test-quality-sentinel.lock.yml', import.meta.url), 'utf8')).not.toContain('github.event.pull_request.stack.position');
 	const collectorCheckout = workflow.match(/- name: Check out pinned evidence collector[\s\S]*?(?=  - name:)/)?.[0];
 	expect(collectorCheckout).toMatch(/ref: [a-f0-9]{40}/);

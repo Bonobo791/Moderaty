@@ -18,11 +18,19 @@ completed; concerns are in its comment, not a deterministic blocking verdict.
 
 ## Runtime and permissions
 
-Uses native Copilot authentication (`copilot-requests: write`), not application
-OpenAI/YouTube/database credentials. GitHub must permit Agentic Workflows and
-native Copilot requests for this repository/account. Runtime availability and
-usage billing must be verified in the first authorized Actions run; no live AI
-request was made during local validation. Missing access fails visibly.
+Uses the `COPILOT_GITHUB_TOKEN` repository secret for Copilot inference,
+not application OpenAI/YouTube/database credentials. For this personal
+repository, create a fine-grained PAT owned by your user account with
+**Account permissions → Copilot Requests: Read**, then add it privately under
+**Settings → Secrets and variables → Actions** as `COPILOT_GITHUB_TOKEN`.
+The token owner needs an active Copilot license and access to the selected model.
+Do not paste the token into PR comments, source files or workflow logs.
+
+The workflow deliberately omits `copilot-requests: write`: that Actions-token
+path requires centralized organization Copilot billing and ignores the PAT.
+The live Actions-token attempts rejected both the default model and explicit
+GPT-5.4. Until the secret is configured, the sentinel fails visibly; there is
+no successful-review fallback. See [GitHub's authentication guide](https://github.github.com/gh-aw/reference/auth/).
 
 The agent has read-only contents/PR permissions. The generated safe-output and
 conclusion jobs request `issues: write` and `pull-requests: write` for GitHub's

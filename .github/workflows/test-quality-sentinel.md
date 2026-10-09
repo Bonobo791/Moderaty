@@ -11,7 +11,7 @@ on:
 permissions:
   contents: read
   pull-requests: read
-  copilot-requests: write
+  copilot-requests: none
 strict: true
 inlined-imports: true
 checkout: false

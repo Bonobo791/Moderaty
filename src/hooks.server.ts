@@ -99,6 +99,16 @@ export const handle: Handle = async (input) => {
 	}
 };
 
+function emitBoundaryFailure(type: 'migration_check_failed' | 'session_lookup_failed', failure: unknown, event: Event) {
+	const controlled = isHttpError(failure);
+	const controlledCategories = { migration_check_failed: 'deployment', session_lookup_failed: 'integrity' } as const;
+	emitOperationalEvent({
+		type, severity: 'error', category: controlled ? controlledCategories[type] : 'database',
+		route: event.route.id, requestId: event.locals.requestId,
+		diagnosticError: controlled ? undefined : failure
+	});
+}
+
 // Resolves the session cookie into locals.user for every request. When the
 // session slid into its renewal window, the cookie is refreshed with the new
 // expiry so active users never get logged out. A database failure here does
@@ -149,7 +159,7 @@ const handleRequest: Handle = async ({ event, resolve }) => {
 	try {
 		await assertMigrationsCurrent();
 	} catch (e) {
-		emitOperationalEvent({ type: 'migration_check_failed', severity: 'error', category: isHttpError(e) ? 'deployment' : 'database', route: event.route.id, requestId: event.locals.requestId, diagnosticError: isHttpError(e) ? undefined : e });
+		emitBoundaryFailure('migration_check_failed', e, event);
 		if (isHttpError(e)) throw e;
 		event.locals.dbDown = true;
 		event.locals.user = null;
@@ -170,7 +180,7 @@ const handleRequest: Handle = async ({ event, resolve }) => {
 		}
 	} catch (e) {
 		// Correlate controlled failures too; never serialize their error body.
-		emitOperationalEvent({ type: 'session_lookup_failed', severity: 'error', category: isHttpError(e) ? 'integrity' : 'database', route: event.route.id, requestId: event.locals.requestId, diagnosticError: isHttpError(e) ? undefined : e });
+		emitBoundaryFailure('session_lookup_failed', e, event);
 		// A deliberate HttpError (e.g. the account-has-no-org integrity failure)
 		// is NOT an outage: let it fail loudly instead of masking it as
 		// maintenance and signing the user out.

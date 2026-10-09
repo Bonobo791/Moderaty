@@ -3,7 +3,8 @@
 The standard GitHub Actions entry point is
 `.github/workflows/test-quality-sentinel.lock.yml`. Its editable source is
 `test-quality-sentinel.md`. It runs on opened, updated, reopened and ready PRs
-targeting `dev` or `main`, including drafts and human-authored PRs. Fork PRs
+targeting `dev` or `main`, including drafts, human-authored and stacked PRs.
+`max-stack: -1` explicitly overrides gh-aw's default top-of-stack-only guard. Fork PRs
 are excluded by gh-aw's default activation policy; this is not a required check
 for forks. There is no author-name filter or dependency on another CI result.
 

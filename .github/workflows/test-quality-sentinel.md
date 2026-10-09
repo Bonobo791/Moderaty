@@ -4,6 +4,7 @@ description: Review behavioral value of TypeScript, Vitest and Playwright tests 
 on:
   pull_request:
     branches: [dev, main]
+    max-stack: -1
     types: [opened, synchronize, reopened, ready_for_review]
   roles: all
   report-blocked-version: false

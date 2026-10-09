@@ -93,6 +93,8 @@ test('reads wildcard filenames literally without mixing in a second test diff', 
 
 test('the introduction workflow runs its pinned collector even when the base has no collector', () => {
 	const workflow = readFileSync(new URL('../.github/workflows/test-quality-sentinel.md', import.meta.url), 'utf8');
+	expect(workflow).toMatch(/max-stack: -1/);
+	expect(readFileSync(new URL('../.github/workflows/test-quality-sentinel.lock.yml', import.meta.url), 'utf8')).not.toContain('github.event.pull_request.stack.position');
 	const collectorCheckout = workflow.match(/- name: Check out pinned evidence collector[\s\S]*?(?=  - name:)/)?.[0];
 	expect(collectorCheckout).toMatch(/ref: [a-f0-9]{40}/);
 	expect(collectorCheckout).toContain('path: .sentinel-collector');

@@ -1,0 +1,529 @@
+{
+  "upstreamRevision": "d72ca6de67c38bab028015991203c7eeff4dce90",
+  "scenarios": [
+    {
+      "scenario": "human-passing",
+      "verdict": "PASS",
+      "accepted": true,
+      "reviewRequired": false,
+      "verifierExit": 0,
+      "actionExit": 0,
+      "exitCode": 0,
+      "tests": {
+        "run": 2,
+        "passed": 2,
+        "failed": 0,
+        "skipped": 0,
+        "retried": 0
+      },
+      "checks": []
+    },
+    {
+      "scenario": "failing-assertion",
+      "verdict": "FAIL",
+      "accepted": false,
+      "reviewRequired": false,
+      "verifierExit": 1,
+      "rejectionReason": "Merge evidence rejected: test process exited 1",
+      "actionExit": 1,
+      "exitCode": 1,
+      "tests": {
+        "run": 2,
+        "passed": 0,
+        "failed": 2,
+        "skipped": 0,
+        "retried": 0
+      },
+      "baseline": {
+        "sha": "3bf6d92f9e0722dbc63be2166d231f469106df63",
+        "exit_code": 0,
+        "totals": {
+          "run": 2,
+          "passed": 2,
+          "failed": 0,
+          "skipped": 0,
+          "retried": 0
+        },
+        "pre_existing": 0,
+        "introduced": [
+          "/tmp/moderaty-merge-examples-VhTOuI/failing-assertion/sum.test.js::adds",
+          "/tmp/moderaty-merge-examples-VhTOuI/failing-assertion/zero.test.js::adds zero"
+        ]
+      },
+      "checks": [
+        "C1",
+        "C2",
+        "C9"
+      ]
+    },
+    {
+      "scenario": "failure-without-claims",
+      "verdict": "FAIL",
+      "accepted": false,
+      "reviewRequired": false,
+      "verifierExit": 1,
+      "rejectionReason": "Merge evidence rejected: test process exited 1",
+      "actionExit": 1,
+      "exitCode": 1,
+      "tests": {
+        "run": 2,
+        "passed": 0,
+        "failed": 2,
+        "skipped": 0,
+        "retried": 0
+      },
+      "baseline": {
+        "sha": "2639c2d943dc93f14d58200530404553d8eb1e57",
+        "exit_code": 0,
+        "totals": {
+          "run": 2,
+          "passed": 2,
+          "failed": 0,
+          "skipped": 0,
+          "retried": 0
+        },
+        "pre_existing": 0,
+        "introduced": [
+          "/tmp/moderaty-merge-examples-VhTOuI/failure-without-claims/sum.test.js::adds",
+          "/tmp/moderaty-merge-examples-VhTOuI/failure-without-claims/zero.test.js::adds zero"
+        ]
+      },
+      "checks": [
+        "C9"
+      ]
+    },
+    {
+      "scenario": "inflated-count",
+      "verdict": "FAIL",
+      "accepted": false,
+      "reviewRequired": false,
+      "verifierExit": 1,
+      "rejectionReason": "Merge evidence rejected: failing or missing discrepancy list",
+      "actionExit": 1,
+      "exitCode": 0,
+      "tests": {
+        "run": 2,
+        "passed": 2,
+        "failed": 0,
+        "skipped": 0,
+        "retried": 0
+      },
+      "checks": [
+        "C2"
+      ]
+    },
+    {
+      "scenario": "tests-added-without-tests",
+      "verdict": "FAIL",
+      "accepted": false,
+      "reviewRequired": false,
+      "verifierExit": 1,
+      "rejectionReason": "Merge evidence rejected: failing or missing discrepancy list",
+      "actionExit": 1,
+      "exitCode": 0,
+      "tests": {
+        "run": 2,
+        "passed": 2,
+        "failed": 0,
+        "skipped": 0,
+        "retried": 0
+      },
+      "checks": [
+        "C7"
+      ]
+    },
+    {
+      "scenario": "skipped-test",
+      "verdict": "NEEDS_HUMAN",
+      "accepted": false,
+      "reviewRequired": true,
+      "verifierExit": 1,
+      "rejectionReason": "Merge evidence rejected: owner review required: execution skipped tests",
+      "actionExit": 1,
+      "exitCode": 0,
+      "tests": {
+        "run": 2,
+        "passed": 1,
+        "failed": 0,
+        "skipped": 1,
+        "retried": 0
+      },
+      "checks": [
+        "C3"
+      ]
+    },
+    {
+      "scenario": "runtime-skipped-test",
+      "verdict": "PASS",
+      "accepted": false,
+      "reviewRequired": true,
+      "verifierExit": 1,
+      "rejectionReason": "Merge evidence rejected: owner review required: execution skipped tests",
+      "actionExit": 0,
+      "exitCode": 0,
+      "tests": {
+        "run": 2,
+        "passed": 1,
+        "failed": 0,
+        "skipped": 1,
+        "retried": 0
+      },
+      "checks": []
+    },
+    {
+      "scenario": "deleted-test",
+      "verdict": "NEEDS_HUMAN",
+      "accepted": false,
+      "reviewRequired": true,
+      "verifierExit": 1,
+      "rejectionReason": "Merge evidence rejected: owner review required: C3: 1 test file deleted in this PR",
+      "actionExit": 1,
+      "exitCode": 0,
+      "tests": {
+        "run": 1,
+        "passed": 1,
+        "failed": 0,
+        "skipped": 0,
+        "retried": 0
+      },
+      "checks": [
+        "C3"
+      ]
+    },
+    {
+      "scenario": "weakened-ci",
+      "verdict": "NEEDS_HUMAN",
+      "accepted": false,
+      "reviewRequired": true,
+      "verifierExit": 1,
+      "rejectionReason": "Merge evidence rejected: owner review required: C4: .github/workflows/checks.yml edited",
+      "actionExit": 1,
+      "exitCode": 0,
+      "tests": {
+        "run": 2,
+        "passed": 2,
+        "failed": 0,
+        "skipped": 0,
+        "retried": 0
+      },
+      "checks": [
+        "C4"
+      ]
+    },
+    {
+      "scenario": "focused-test",
+      "verdict": "FAIL",
+      "accepted": false,
+      "reviewRequired": true,
+      "verifierExit": 1,
+      "rejectionReason": "Merge evidence rejected: test process exited 1",
+      "actionExit": 1,
+      "exitCode": 1,
+      "tests": {
+        "run": 2,
+        "passed": 1,
+        "failed": 1,
+        "skipped": 0,
+        "retried": 0
+      },
+      "baseline": {
+        "sha": "2259b7b1fd6a8f32fd2f2c15901a75e57f20285d",
+        "exit_code": 0,
+        "totals": {
+          "run": 2,
+          "passed": 2,
+          "failed": 0,
+          "skipped": 0,
+          "retried": 0
+        },
+        "pre_existing": 0,
+        "introduced": [
+          "/tmp/moderaty-merge-examples-VhTOuI/focused-test/sum.test.js::adds"
+        ]
+      },
+      "checks": [
+        "C1",
+        "C3",
+        "C9"
+      ]
+    },
+    {
+      "scenario": "renamed-away-test",
+      "verdict": "NEEDS_HUMAN",
+      "accepted": false,
+      "reviewRequired": true,
+      "verifierExit": 1,
+      "rejectionReason": "Merge evidence rejected: owner review required: C3: 1 test file renamed in this PR",
+      "actionExit": 1,
+      "exitCode": 0,
+      "tests": {
+        "run": 1,
+        "passed": 1,
+        "failed": 0,
+        "skipped": 0,
+        "retried": 0
+      },
+      "checks": [
+        "C3"
+      ]
+    },
+    {
+      "scenario": "unmentioned-dependency",
+      "verdict": "NEEDS_HUMAN",
+      "accepted": false,
+      "reviewRequired": true,
+      "verifierExit": 1,
+      "rejectionReason": "Merge evidence rejected: owner review required: C5: 1 dependency file changed, none mentioned in the PR body",
+      "actionExit": 1,
+      "exitCode": 0,
+      "tests": {
+        "run": 2,
+        "passed": 2,
+        "failed": 0,
+        "skipped": 0,
+        "retried": 0
+      },
+      "checks": [
+        "C5"
+      ]
+    },
+    {
+      "scenario": "mentioned-dependency",
+      "verdict": "PASS",
+      "accepted": true,
+      "reviewRequired": false,
+      "verifierExit": 0,
+      "actionExit": 0,
+      "exitCode": 0,
+      "tests": {
+        "run": 2,
+        "passed": 2,
+        "failed": 0,
+        "skipped": 0,
+        "retried": 0
+      },
+      "checks": []
+    },
+    {
+      "scenario": "updated-snapshot",
+      "verdict": "NEEDS_HUMAN",
+      "accepted": false,
+      "reviewRequired": true,
+      "verifierExit": 1,
+      "rejectionReason": "Merge evidence rejected: owner review required: C6: 1 snapshot/golden file updated",
+      "actionExit": 1,
+      "exitCode": 0,
+      "tests": {
+        "run": 2,
+        "passed": 2,
+        "failed": 0,
+        "skipped": 0,
+        "retried": 0
+      },
+      "checks": [
+        "C6"
+      ]
+    },
+    {
+      "scenario": "unmentioned-scope",
+      "verdict": "NEEDS_HUMAN",
+      "accepted": false,
+      "reviewRequired": true,
+      "verifierExit": 1,
+      "rejectionReason": "Merge evidence rejected: owner review required: C8: 1 changed file not mentioned in the PR body",
+      "actionExit": 1,
+      "exitCode": 0,
+      "tests": {
+        "run": 2,
+        "passed": 2,
+        "failed": 0,
+        "skipped": 0,
+        "retried": 0
+      },
+      "checks": [
+        "C8"
+      ]
+    },
+    {
+      "scenario": "mentioned-scope",
+      "verdict": "PASS",
+      "accepted": true,
+      "reviewRequired": false,
+      "verifierExit": 0,
+      "actionExit": 0,
+      "exitCode": 0,
+      "tests": {
+        "run": 2,
+        "passed": 2,
+        "failed": 0,
+        "skipped": 0,
+        "retried": 0
+      },
+      "checks": []
+    },
+    {
+      "scenario": "lowered-coverage",
+      "verdict": "NEEDS_HUMAN",
+      "accepted": false,
+      "reviewRequired": true,
+      "verifierExit": 1,
+      "rejectionReason": "Merge evidence rejected: owner review required: C4: vitest.config.mjs edited",
+      "actionExit": 1,
+      "exitCode": 0,
+      "tests": {
+        "run": 2,
+        "passed": 2,
+        "failed": 0,
+        "skipped": 0,
+        "retried": 0
+      },
+      "checks": [
+        "C4"
+      ]
+    },
+    {
+      "scenario": "gate-policy-edit",
+      "verdict": "PASS",
+      "accepted": false,
+      "reviewRequired": true,
+      "verifierExit": 1,
+      "rejectionReason": "Merge evidence rejected: owner review required for gate changes: .github/merge-evidence-policy.yml",
+      "actionExit": 0,
+      "exitCode": 0,
+      "tests": {
+        "run": 2,
+        "passed": 2,
+        "failed": 0,
+        "skipped": 0,
+        "retried": 0
+      },
+      "checks": []
+    },
+    {
+      "scenario": "gate-verifier-edit",
+      "verdict": "PASS",
+      "accepted": false,
+      "reviewRequired": true,
+      "verifierExit": 1,
+      "rejectionReason": "Merge evidence rejected: owner review required for gate changes: scripts/merge-evidence/verify.mjs",
+      "actionExit": 0,
+      "exitCode": 0,
+      "tests": {
+        "run": 2,
+        "passed": 2,
+        "failed": 0,
+        "skipped": 0,
+        "retried": 0
+      },
+      "checks": []
+    },
+    {
+      "scenario": "unavailable-diff",
+      "verdict": "PASS",
+      "accepted": false,
+      "reviewRequired": false,
+      "verifierExit": 1,
+      "rejectionReason": "Merge evidence rejected: PR diff could not be independently verified: fatal: Not a valid commit name ffffffffffffffffffffffffffffffffffffffff",
+      "actionExit": 0,
+      "exitCode": 0,
+      "tests": {
+        "run": 2,
+        "passed": 2,
+        "failed": 0,
+        "skipped": 0,
+        "retried": 0
+      },
+      "checks": []
+    },
+    {
+      "scenario": "pre-existing-failure",
+      "verdict": "PASS",
+      "accepted": false,
+      "reviewRequired": false,
+      "verifierExit": 1,
+      "rejectionReason": "Merge evidence rejected: test process exited 1",
+      "actionExit": 0,
+      "exitCode": 1,
+      "tests": {
+        "run": 2,
+        "passed": 0,
+        "failed": 2,
+        "skipped": 0,
+        "retried": 0
+      },
+      "baseline": {
+        "sha": "949717b70a6f3104f0d824faa0042f8e21d98be3",
+        "exit_code": 1,
+        "totals": {
+          "run": 2,
+          "passed": 0,
+          "failed": 2,
+          "skipped": 0,
+          "retried": 0
+        },
+        "pre_existing": 2,
+        "introduced": []
+      },
+      "checks": []
+    },
+    {
+      "scenario": "removed-test-with-failure",
+      "verdict": "FAIL",
+      "accepted": false,
+      "reviewRequired": false,
+      "verifierExit": 1,
+      "rejectionReason": "Merge evidence rejected: test process exited 1",
+      "actionExit": 1,
+      "exitCode": 1,
+      "tests": {
+        "run": 1,
+        "passed": 0,
+        "failed": 1,
+        "skipped": 0,
+        "retried": 0
+      },
+      "baseline": {
+        "sha": "a5e839b32aafaf34dd5cc56fb957e9dfcc391502",
+        "exit_code": 0,
+        "totals": {
+          "run": 2,
+          "passed": 2,
+          "failed": 0,
+          "skipped": 0,
+          "retried": 0
+        },
+        "pre_existing": 0,
+        "introduced": [
+          "/tmp/moderaty-merge-examples-VhTOuI/removed-test-with-failure/sum.test.js::adds"
+        ]
+      },
+      "checks": [
+        "C3",
+        "C9"
+      ]
+    },
+    {
+      "scenario": "legitimate-test-addition",
+      "verdict": "PASS",
+      "accepted": true,
+      "reviewRequired": false,
+      "verifierExit": 0,
+      "actionExit": 0,
+      "exitCode": 0,
+      "tests": {
+        "run": 3,
+        "passed": 3,
+        "failed": 0,
+        "skipped": 0,
+        "retried": 0
+      },
+      "checks": []
+    },
+    {
+      "scenario": "stale-report-no-execution",
+      "verdict": "BLOCKED_BEFORE_RUN",
+      "accepted": false,
+      "reviewRequired": false
+    }
+  ]
+}

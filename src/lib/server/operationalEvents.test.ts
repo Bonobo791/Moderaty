@@ -104,3 +104,18 @@ test('hostile diagnostic metadata stays contained and oversized stacks are not p
 	expect(JSON.parse(log.mock.calls.at(-1)![0]).errorFingerprint).toBeNull();
 	expect(JSON.stringify(log.mock.calls)).not.toContain('synthetic-private-value');
 });
+
+test('structured diagnostics preserve known provider causes without exposing private text', () => {
+	const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+	const send = (code: string) => {
+		const cause = Object.assign(new Error('synthetic-private-provider-message'), {code, httpStatus:503});
+		const failure = new Error('synthetic-private-wrapper-message', {cause});
+		emitOperationalEvent({type:'unexpected_server_error', severity:'error', category:'database', route:'/', requestId, diagnosticError:failure});
+		return JSON.parse(log.mock.calls.at(-1)![0]);
+	};
+	const busy = send('SQLITE_BUSY');
+	const unavailable = send('ECONNREFUSED');
+	expect(busy.errorCauses).toEqual([{kind:'Error', code:null, httpStatus:null}, {kind:'Error', code:'SQLITE_BUSY', httpStatus:503}]);
+	expect(unavailable.errorCauses[1].code).toBe('ECONNREFUSED');
+	expect(JSON.stringify(log.mock.calls)).not.toContain('synthetic-private');
+});

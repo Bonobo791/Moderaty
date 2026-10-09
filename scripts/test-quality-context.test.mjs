@@ -67,6 +67,24 @@ test('reports no test changes for documentation-only edits', () => {
 	expect(collectContext(f).tests).toEqual([]);
 });
 
+test('retains added, deleted and renamed Playwright cases and Netlify production', () => {
+	const f = fixture({ 'e2e/old.pw.ts': 'browser before\n', 'e2e/deleted.pw.ts': 'deleted case\n', 'netlify/functions/cron.mjs': 'old cron\n' },
+		{ 'e2e/old.pw.ts': null, 'e2e/renamed.pw.ts': 'browser before\n', 'e2e/deleted.pw.ts': null, 'e2e/added.pw.ts': 'new browser case\n', 'netlify/functions/cron.mjs': 'new cron\n' });
+	const result = collectContext(f);
+	expect(result.tests.map(({path}) => path).sort()).toEqual(['e2e/added.pw.ts', 'e2e/deleted.pw.ts', 'e2e/renamed.pw.ts']);
+	expect(result.tests.find(({path}) => path === 'e2e/deleted.pw.ts').after).toBeNull();
+	expect(result.tests.find(({path}) => path === 'e2e/renamed.pw.ts').previousPath).toBe('e2e/old.pw.ts');
+	expect(result.productionChanges).toEqual([expect.objectContaining({path: 'netlify/functions/cron.mjs', before: 'old cron\n', after: 'new cron\n'})]);
+});
+
+test('CI requires the real browser regression and its type check', () => {
+	const workflow = readFileSync(new URL('../.github/workflows/checks.yml', import.meta.url), 'utf8');
+	expect(workflow).toContain('run: npm run check:e2e');
+	expect(workflow).toContain('run: npx playwright install --with-deps chromium');
+	expect(workflow).toContain('run: npm run test:e2e');
+	expect(workflow).not.toContain('continue-on-error');
+});
+
 test('fails loudly for invalid refs and oversized evidence instead of reporting a clean review', () => {
 	const f = fixture({ 'src/x.test.ts': 'before\n' }, { 'src/x.test.ts': 'after\n' });
 	expect(() => collectContext({ ...f, head: '--help' })).toThrow(/commit SHA/);
@@ -91,19 +109,24 @@ test('reads wildcard filenames literally without mixing in a second test diff', 
 });
 
 
-test('the introduction workflow runs its pinned collector even when the base has no collector', () => {
+test('Codex workflow restricts repository access and omits Copilot credentials', () => {
 	const workflow = readFileSync(new URL('../.github/workflows/test-quality-sentinel.md', import.meta.url), 'utf8');
-	expect(workflow).toMatch(/  pull_request_target:\n/);
 	expect(workflow).not.toMatch(/  pull_request:\n/);
 	expect(workflow).toContain('if: github.event.pull_request.head.repo.id == github.event.repository.id');
 	expect(workflow).toContain('id: codex');
-	expect(workflow).toContain('model: gpt-5.4');
 	expect(workflow).toContain('bash: false');
 	expect(workflow).not.toContain('copilot-requests: write');
 	const compiled = readFileSync(new URL('../.github/workflows/test-quality-sentinel.lock.yml', import.meta.url), 'utf8');
 	expect(compiled).not.toContain('secrets.COPILOT_GITHUB_TOKEN');
 	expect(compiled).toContain('secrets.CODEX_API_KEY || secrets.OPENAI_API_KEY');
 	expect(compiled).toContain('features.shell_tool=false');
+	expect(compiled).toContain('github.event.pull_request.head.repo.id == github.event.repository.id');
+});
+
+test('the introduction workflow runs its pinned collector even when the base has no collector', () => {
+	const workflow = readFileSync(new URL('../.github/workflows/test-quality-sentinel.md', import.meta.url), 'utf8');
+	expect(workflow).toMatch(/  pull_request_target:\n/);
+	expect(workflow).toContain('model: gpt-5.4');
 	expect(readFileSync(new URL('../.github/workflows/test-quality-sentinel.lock.yml', import.meta.url), 'utf8')).not.toContain('github.event.pull_request.stack.position');
 	const collectorCheckout = workflow.match(/- name: Check out pinned evidence collector[\s\S]*?(?=  - name:)/)?.[0];
 	expect(collectorCheckout).toMatch(/ref: [a-f0-9]{40}/);

@@ -59,6 +59,7 @@ export function createPipelineMocks() {
 		refreshAccessToken: vi.fn(async () => 'access-token'),
 		fetchNewComments: vi.fn(),
 		fetchVideoMetadata: vi.fn(async () => new Map()),
+		fetchAuthorHandles: vi.fn(async () => new Map()),
 		getCommentModerationStatus: vi.fn(async (_id: string): Promise<CommentModerationStatus | null> => null),
 		setModerationStatus: vi.fn(async (_ids: string[]) => {}),
 		deleteComment: vi.fn(async (_id: string) => {}),
@@ -91,6 +92,7 @@ export async function youtubeMockModule(mocks: PipelineMocks) {
 		refreshAccessToken: mocks.refreshAccessToken,
 		fetchNewComments: mocks.fetchNewComments,
 		fetchVideoMetadata: mocks.fetchVideoMetadata,
+		fetchAuthorHandles: mocks.fetchAuthorHandles,
 		getCommentModerationStatus: mocks.getCommentModerationStatus,
 		setModerationStatus: mocks.setModerationStatus,
 		deleteComment: mocks.deleteComment

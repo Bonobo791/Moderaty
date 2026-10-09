@@ -33,9 +33,16 @@ test.each(['../../etc/passwd', '/bin/sh', '$(exit 42)'])('compiler rejects calle
 
 test('Codex normalization omits unused Copilot credentials while preserving OpenAI and GitHub checks', () => {
 	const workflow = readFileSync(new URL('../.github/workflows/test-quality-sentinel.lock.yml', import.meta.url), 'utf8');
-	const generated = workflow.replace('          GH_AW_GITHUB_TOKEN: $' + '{{ secrets.GH_AW_GITHUB_TOKEN }}',
+	let generated = workflow.replace('          GH_AW_GITHUB_TOKEN: $' + '{{ secrets.GH_AW_GITHUB_TOKEN }}',
 		'          COPILOT_GITHUB_TOKEN: $' + '{{ secrets.COPILOT_GITHUB_TOKEN }}\n          GH_AW_GITHUB_TOKEN: $' + '{{ secrets.GH_AW_GITHUB_TOKEN }}');
+	generated = generated.replace(/^# gh-aw-manifest: (.+)$/m, (_, json) => {
+		const manifest = JSON.parse(json);
+		manifest.secrets.push('COPILOT_GITHUB_TOKEN');
+		return '# gh-aw-manifest: ' + JSON.stringify(manifest);
+	}).replace('# Secrets used:', '# Secrets used:\n#   - COPILOT_GITHUB_TOKEN');
 	expect(generated).toContain('secrets.COPILOT_GITHUB_TOKEN');
+	expect(generated).toContain('#   - COPILOT_GITHUB_TOKEN');
+	expect(JSON.parse(generated.match(/^# gh-aw-manifest: (.+)$/m)[1]).secrets).toContain('COPILOT_GITHUB_TOKEN');
 	const normalized = normalizeCodexWorkflow(generated);
 	expect(normalized).toBe(workflow);
 	expect(normalizeCodexWorkflow(normalized)).toBe(normalized);

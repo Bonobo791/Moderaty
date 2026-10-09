@@ -12,7 +12,7 @@ npm run check:e2e
 npm run test:e2e
 ```
 
-Use a checkout without dotenv files. The launcher refuses `.env` and `.env.*` except `.env.example`, drops inherited credentials and Node preloads, generates synthetic secrets, and creates a temporary file-backed libSQL database. It creates the documented pre-0000 base tables, applies the full real migration journal, and checks the applied count. Teardown stops the server and removes the database. Browser reports are under `reports/playwright/` and `reports/playwright-results/`.
+The launcher isolates application source in a temporary project containing synthetic dotenv files, drops inherited credentials and Node preloads, generates synthetic secrets, and creates a temporary file-backed libSQL database. Developer dotenv files remain untouched. It creates the documented pre-0000 base tables, applies the full real migration journal, and checks the applied count. Teardown stops the server and removes the database. Browser reports are under `reports/playwright/` and `reports/playwright-results/`.
 
 This environment used Playwright 1.64.0 and Chromium 153.0.8010.0 with `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/tmp/moderaty-chromium`: the standard browser download returned HTML instead of a ZIP. The alternate Chromium binary came from `@sparticuz/chromium` 153.0.0 outside the repository. A normal setup uses Playwright's bundled Chromium. The override changes the executable, with identical assertions and application paths.
 
@@ -98,45 +98,43 @@ Malformed-input cases remain tested under the corrected expected failure type.
 The additional protection read is one statement per batch. The existing bulk
 staging test still checks identical query counts for 3 versus 300 comments,
 all 303 comment rows, all 303 credit transactions, and exact outcomes. Its exact
-statement count now records 11 including the necessary security read instead
-of 10. No coverage, mutation, discovery or CI threshold changed.
+statement count now records 12 including the reads before and inside the
+staging transaction instead of 10. No coverage, mutation, discovery or CI threshold changed.
 
 Playwright's existing exact dev-dependency pin is authorized by the owner's
 explicit Playwright request and design approvals; that approval is now recorded
 in AGENTS.md.
 
-### Open privacy and handle-log findings
+### PR #226 privacy redesign
 
-The stored browser evidence proves both findings: the protected configuration
-contains `resolvedChannelId: UCsynthetic_protected_author` although the owner
-entered only `@protected_creator`; the ordinary control's completed ban audit
-contains `authorHandle: null`. The current privacy/FAQ/DPA promise permits only
-owner-entered configuration identifiers, and describes ordinary verified handles
-in the activity log with 30-day/on-demand erasure. These are remaining shipping
-blockers, not dismissed reviewer suggestions. No legal text, consent version,
-retention policy, production database or applied migration was changed.
+The owner chose protection that follows the current holder of the entered handle.
+Configuration now stores only that normalized handle. Each run resolves its
+current channel ID in memory, with five concurrent lookups bounded by the
+existing run deadline. Missing or failed lookups hold comments for human review.
+Staging reuses only proofs for unchanged row IDs and handles; a newly configured
+entry without a current proof also causes review. Removing protection during
+scoring queues a stale approval and clears its protection label.
 
-Proposed privacy-preserving redesign, for owner decision:
+Ordinary commenters' handles come from authoritative `channels.list` snippets,
+in batches of at most 50 IDs. Only `@` custom URLs become normalized audit and
+moderation-action handles. Display names and channel IDs remain in memory.
+Existing 30-day and on-demand handle erasure remains in place.
 
-1. Persist only the entered protected handle. Resolve handles to authoritative
-   channel IDs per run, keep the mapping in memory, and hold ambiguous identities
-   for review. Use bounded external calls and the run's existing deadline.
-2. Resolve ordinary author IDs in bounded channels.list batches to authoritative
-   snippet.customUrl @handles. Retain only verified handles through the existing
-   TTL/erasure flow. Never use display names as handles, and discard IDs and names.
-3. Guard configuration changes at staging; keep the ban-positive control and
-   add real-browser persistence assertions that forbid resolved IDs in storage.
-4. Reconcile nullable schema changes using new migrations only; do not edit
-   applied migrations or claim a persisted ID is anonymous because it is hashed.
+Migration `0072_protected_handles_memory_only` removes `resolved_channel_id`,
+keeps the newest duplicate configuration row and adds per-channel handle
+uniqueness. Migration 0071 remains unchanged. Upgrade tests execute the new SQL
+against pre-existing identity data, verify its removal and reject duplicates.
+No production database or legal disclosure was modified.
 
-This changes the earlier approved account binding: protection would follow the
-current holder of the entered @handle and would require a configuration update
-when that handle changes. Keeping protection bound to the original account
-instead would require a separately approved configuration/retention disclosure
-and consent design. That choice has not been made in this review, so neither
-semantic changes nor legal changes were implemented silently. This regression
-still covers newly scored actions, not a protection added after action staging
-or an already-dispatched request.
+Pending destructive actions re-read current comment authors and protection
+before their dispatch claim. A newly protected author supersedes a pending ban;
+unresolved identity changes the pending action to a review hold. An external
+request already sent to YouTube cannot be withdrawn, and YouTube offers no
+API to reverse a completed author ban.
+
+The browser regression now forbids stored resolved IDs and verifies the ordinary
+control's normalized handle in its completed ban audit. Earlier evidence files
+record the previous account-binding implementation; they are historical evidence.
 
 ### Check and bot dispositions
 

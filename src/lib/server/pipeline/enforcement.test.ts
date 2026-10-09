@@ -63,11 +63,16 @@ test('re-applies a dispatched hold without requesting YouTube moderation status'
 
 test('verifies a dispatched action after its completion transaction fails', async () => {
 	mocks.state.ruleRows = [{ id: 1, channelId: 'channel', type: 'keyword', pattern: 'comment', action: 'reject' }];
-	mocks.db.transaction
-		.mockImplementationOnce(async (callback: (value: typeof mocks.db.transactionValue) => Promise<unknown>) => callback(mocks.db.transactionValue))
-		.mockImplementationOnce(async (callback: (value: typeof mocks.db.transactionValue) => Promise<unknown>) => callback(mocks.db.transactionValue))
-		.mockImplementationOnce(async (callback: (value: typeof mocks.db.transactionValue) => Promise<unknown>) => callback(mocks.db.transactionValue))
-		.mockRejectedValueOnce(new Error('database write failed'));
+	let completionFailed = false;
+	mocks.db.transaction.mockImplementation(async (callback: (value: typeof mocks.db.transactionValue) => Promise<unknown>) => {
+		// Fail at the completion boundary after the remote write, independently
+		// of how many liveness/protection transactions ran beforehand.
+		if (!completionFailed && mocks.setModerationStatus.mock.calls.length) {
+			completionFailed = true;
+			throw new Error('database write failed');
+		}
+		return mocks.defaultTransaction(callback);
+	});
 
 	await expect(runChannel('channel')).rejects.toThrow('database write failed');
 

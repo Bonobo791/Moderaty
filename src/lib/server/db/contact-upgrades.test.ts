@@ -54,7 +54,7 @@ test.each([58, 60])('upgrades the synthetic base at %i through the real journal 
 			await client.execute({ sql: 'INSERT INTO __drizzle_migrations (hash, created_at) VALUES (?, ?)', args: [hash(sqlFile(entry.tag)), entry.when] });
 		}
 		await migrate(drizzle(client), { migrationsFolder: folder });
-		expect((await client.execute('SELECT handle, resolved_channel_id FROM channel_allowed_handles')).rows).toEqual([{ handle: 'legacy_handle', resolved_channel_id: null }]);
+		expect((await client.execute('SELECT handle FROM channel_allowed_handles')).rows).toEqual([{ handle: 'legacy_handle' }]);
 		expect((await client.execute('SELECT id, status, restore_intent_id FROM comments')).rows).toEqual([
 			{ id: 'legacy-comment', status: 'restoring', restore_intent_id: null }
 		]);

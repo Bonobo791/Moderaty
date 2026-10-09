@@ -7,7 +7,7 @@ import { DeadlineExceededError } from '$lib/server/http';
 import { prepareRules } from '$lib/server/rules';
 import type { ToneProtections } from '$lib/server/tone';
 import { TONE_LEVEL_OMNI_AND_TONE } from '$lib/toneLevels';
-import { fetchVideoMetadata, type CommentPage } from '$lib/server/youtube';
+import { fetchVideoMetadata, fetchAuthorHandles, resolveHandleChannelId, type CommentPage } from '$lib/server/youtube';
 import { decide, metadataUnavailable } from './decisions';
 import { hasHumanClaim } from './human-claims';
 import type { AiBudget, Decision, DecisionBatchOptions, ScoreOutcome } from './types';
@@ -115,7 +115,7 @@ const storedIds =
 const existingIds = new Set(storedIds);
 const rulesForChannel = prepareRules(await db.select().from(rules).where(eq(rules.channelId, channelId)).all());
 // One allowlist read per run; decide() checks it before any rule or scoring.
-const allowlist = await loadProtectedIdentities(channelId);
+const allowlist = await loadProtectedIdentities(channelId, db, handle => resolveHandleChannelId(handle, options.accessToken, options.deadline));
 // Dedupe three ways: against already-stored comments, within this batch,
 // and against comments this scan already staged (the scan_id marker). The
 // last keeps a parked rescan page from re-scoring finished work every tick;
@@ -130,6 +130,8 @@ const newComments = page.comments.filter((comment) => {
 	seen.add(comment.id);
 	return true;
 });
+const handles = await fetchAuthorHandles(newComments.map(comment => comment.authorChannelId), options.accessToken, options.deadline);
+for (const comment of newComments) comment.authorHandle = handles.get(comment.authorChannelId) ?? null;
 // A ticked protection flag forces the tone pass on even below
 // TONE_LEVEL_OMNI_AND_TONE: the channel owner asked for heightened scrutiny,
 // so the checkbox must never be a silent no-op.
@@ -218,7 +220,7 @@ export async function decideNewComments(
 		scanStamp,
 		consumeCredits
 	}: DecisionBatchOptions
-): Promise<{ decisions: Decision[]; failures: string[]; deferred: number; protectedIds: string[] }> {
+): Promise<{ decisions: Decision[]; failures: string[]; deferred: number; protectedIds: string[]; protection: Awaited<ReturnType<typeof loadProtectedIdentities>> }> {
 	const batch = await prepareDecisionBatch(channelId, page, {
 		accessToken,
 		toneLevel,
@@ -240,5 +242,5 @@ export async function decideNewComments(
 		protections,
 		openAiKey
 	});
-	return { ...foldDecisions(settled), protectedIds: batch.protectedIds };
+	return { ...foldDecisions(settled), protectedIds: batch.protectedIds, protection: batch.allowlist };
 }

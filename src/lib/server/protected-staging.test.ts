@@ -9,9 +9,12 @@ import { prepareRules } from './rules';
 
 setupTestDb(['channels', 'channel_allowed_handles', 'comments', 'moderation_actions', 'audit_log']);
 beforeEach(async () => {
+	vi.stubGlobal('fetch', async () => Response.json({items:[{id:'protected-author'}]}));
 	await testDb().db.insert(channels).values({ id: 'owner', title: 'Synthetic Channel', refreshTokenEnc: 'synthetic-grant' });
 });
 afterEach(() => vi.unstubAllGlobals());
+const resolver = async () => 'protected-author';
+const stage = (decisions: Parameters<typeof stageDecisions>[1]) => stageDecisions('owner', decisions, {accessToken:'synthetic-token'});
 const rules = prepareRules([{ id: 1, type: 'keyword', pattern: 'ban-trigger', action: 'ban' }]);
 const options = { protections: { protectLgbtqia: 0, protectWomen: 0 }, deadline: undefined, openAiKey: undefined };
 const comment = { id: 'protected-comment', threadId: 'thread', videoId: null, authorChannelId: 'protected-author', authorName: 'Different Display Name', text: 'ban-trigger', publishedAt: '2026-10-09T00:00:00Z' };
@@ -21,8 +24,8 @@ test('new protection replaces a stale ban before staging, with an unprotected ba
 	const decisions = await Promise.all([comment, { ...comment, id: 'control-comment', authorChannelId: 'other-author' }].map(c => decide(c, rules, snapshot, null, { remaining: 0 }, options)));
 	expect(decisions.map(d => d.youtubeAction)).toEqual(['ban', 'ban']);
 	// The owner's verification commits after the scoring snapshot was taken.
-	await testDb().db.insert(channelAllowedHandles).values({ channelId: 'owner', handle: 'protected_handle', resolvedChannelId: 'protected-author' });
-	expect(await stageDecisions('owner', decisions)).toMatchObject({ acted: 1, queued: 0 });
+	await testDb().db.insert(channelAllowedHandles).values({ channelId: 'owner', handle: 'protected_handle' });
+	expect(await stage(decisions)).toMatchObject({ acted: 1, queued: 0 });
 	expect(await testDb().db.select().from(moderationActions).all()).toEqual([expect.objectContaining({ commentId: 'control-comment', action: 'ban', state: 'pending' })]);
 	expect(await testDb().db.select().from(comments).all()).toEqual(expect.arrayContaining([
 		expect.objectContaining({ id: 'protected-comment', status: 'approved', decidedBy: 'allowlist', authorName: null, authorChannelId: null }),
@@ -35,6 +38,8 @@ test('new protection replaces a stale ban before staging, with an unprotected ba
 	vi.stubGlobal('fetch', async (input: string | URL | Request) => {
 		const url = new URL(input instanceof Request ? input.url : String(input));
 		expect(url.origin).toBe('https://www.googleapis.com');
+		if (url.pathname === '/youtube/v3/channels') return Response.json({items:[{id:'protected-author'}]});
+		if (url.pathname === '/youtube/v3/comments') return Response.json({items:[{id:'control-comment',snippet:{authorChannelId:{value:'other-author'}}}]});
 		expect(url.pathname).toBe('/youtube/v3/comments/setModerationStatus');
 		writes.push(url.href);
 		return new Response(null, { status: 204 });
@@ -47,10 +52,39 @@ test('new protection replaces a stale ban before staging, with an unprotected ba
 });
 
 test('new unresolved protection replaces stale destructive actions with review holds', async () => {
-	const stale = await decide(comment, rules, await loadProtectedIdentities('owner'), null, { remaining: 0 }, options);
+	const stale = await decide(comment, rules, await loadProtectedIdentities('owner', undefined, resolver), null, { remaining: 0 }, options);
 	expect(stale.youtubeAction).toBe('ban');
 	await testDb().db.insert(channelAllowedHandles).values({ channelId: 'owner', handle: 'unresolved_handle' });
-	expect(await stageDecisions('owner', [stale])).toMatchObject({ acted: 1, queued: 1 });
+	vi.stubGlobal('fetch', async () => Response.json({items:[]}));
+	expect(await stage([stale])).toMatchObject({ acted: 1, queued: 1 });
 	expect(await testDb().db.select().from(moderationActions).all()).toEqual([expect.objectContaining({ action: 'hold' })]);
 	expect(await testDb().db.select().from(comments).all()).toEqual([expect.objectContaining({ status: 'pending', decidedBy: 'none' })]);
+});
+
+test('removing protection after scoring queues the stale approval and clears its protection label', async () => {
+	await testDb().db.insert(channelAllowedHandles).values({channelId: 'owner', handle: 'protected_handle'});
+	const stale = await decide(comment, rules, await loadProtectedIdentities('owner', undefined, resolver), null, {remaining: 0}, options);
+	expect(stale.decidedBy).toBe('allowlist');
+	await testDb().db.delete(channelAllowedHandles);
+	expect(await stage([stale])).toMatchObject({acted: 1, queued: 1});
+	expect(await testDb().db.select().from(comments).all()).toEqual([expect.objectContaining({status: 'pending', decidedBy: 'none'})]);
+	expect(await testDb().db.select().from(auditLog).all()).toEqual([expect.objectContaining({action: 'queue', authorHandle: null})]);
+});
+
+test('a protection added after staging supersedes a pending ban before YouTube dispatch', async () => {
+	const stale = await decide(comment, rules, await loadProtectedIdentities('owner'), null, {remaining:0}, options);
+	await stage([stale]);
+	await testDb().db.insert(channelAllowedHandles).values({channelId:'owner', handle:'protected_handle'});
+	const writes: string[] = [];
+	vi.stubGlobal('fetch', async (input: string | URL | Request, init?: RequestInit) => {
+		const url = new URL(input instanceof Request ? input.url : String(input));
+		if (init?.method === 'POST') {writes.push(url.href); return new Response(null, {status:204});}
+		if (url.pathname.endsWith('/channels')) return Response.json({items:[{id:'protected-author'}]});
+		if (url.pathname.endsWith('/comments')) return Response.json({items:[{id:comment.id,snippet:{authorChannelId:{value:'protected-author'}}}]});
+		throw new Error('Unexpected provider request');
+	});
+	expect(await runEnforcement('owner', 'synthetic-token', undefined, null, 0)).toMatchObject({acted:0});
+	expect(writes).toEqual([]);
+	expect(await testDb().db.select().from(moderationActions).all()).toEqual([expect.objectContaining({state:'superseded', action:'ban'})]);
+	expect(await testDb().db.select().from(comments).all()).toEqual([expect.objectContaining({status:'approved', decidedBy:'allowlist'})]);
 });

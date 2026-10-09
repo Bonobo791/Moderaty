@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, chmodSync, readFileSync } from 'node:fs';
@@ -220,4 +221,47 @@ test('an identical base and head fails instead of claiming a clean audit', () =>
 		git(cwd, 'commit', '--allow-empty', '-qm', 'baseline');
 		assert.throws(() => auditRepository({ cwd, base: git(cwd, 'rev-parse', 'HEAD') }), /empty/i);
 	} finally { rmSync(cwd, { recursive: true, force: true }); }
+});
+
+test('audits text hidden by candidate binary attributes and hashes the exact raw patch', () => {
+	const cwd = mkdtempSync(join(tmpdir(), 'moderaty-overlock-binary-'));
+	try {
+		git(cwd, 'init', '-q');
+		git(cwd, 'config', 'user.name', 'Fixture');
+		git(cwd, 'config', 'user.email', 'fixture@example.invalid');
+		writeFileSync(join(cwd, 'case.pw.ts'), exact);
+		git(cwd, 'add', '.');
+		git(cwd, 'commit', '-qm', 'baseline');
+		const base = git(cwd, 'rev-parse', 'HEAD');
+		writeFileSync(join(cwd, '.gitattributes'), '*.pw.ts binary\n');
+		writeFileSync(join(cwd, 'case.pw.ts'), exact.replace('it(', 'it.skip(') + '  ');
+		git(cwd, 'add', '.');
+		git(cwd, 'commit', '-qm', 'weakening');
+		const report = auditRepository({cwd, base});
+		assert.equal(report.ok, false);
+		assert.ok(report.findings.some(f => f.rule === 'TEST_SKIPPED_ADDED' && f.file === 'case.pw.ts'));
+		const raw = spawnSync('/usr/bin/git', ['diff', '--text', '--no-ext-diff', '--no-textconv', '--no-renames', '--unified=80', base, 'HEAD', '--'], {cwd, encoding: 'utf8'});
+		assert.equal(raw.status, 0);
+		assert.equal(report.patch_sha256, createHash('sha256').update(raw.stdout).digest('hex'));
+	} finally { rmSync(cwd, {recursive: true, force: true}); }
+});
+
+test('policy selection fails closed when an established base is missing its lockfile', () => {
+	const cwd = mkdtempSync(join(tmpdir(), 'moderaty-overlock-policy-'));
+	try {
+		mkdirSync(join(cwd, 'policy/.github/workflows'), {recursive: true});
+		mkdirSync(join(cwd, 'candidate/.github/overlock'), {recursive: true});
+		writeFileSync(join(cwd, 'policy/.github/workflows/overlock.yml'), 'existing policy');
+		writeFileSync(join(cwd, 'candidate/.github/overlock/package.json'), '{}');
+		writeFileSync(join(cwd, 'candidate/.github/overlock/package-lock.json'), '{}');
+		const workflow = readFileSync(new URL('../../.github/workflows/overlock.yml', import.meta.url), 'utf8');
+		const selection = workflow.match(/run: \|\n([\s\S]*?)          tool=/)[1].replace(/^          /gm, '');
+		const result = spawnSync('/bin/bash', ['--noprofile', '--norc', '-c', selection], {encoding: 'utf8', env: {PATH:'/usr/bin:/bin', GITHUB_WORKSPACE:cwd}});
+		assert.notEqual(result.status, 0);
+		assert.ok(result.stdout.includes('::error::'));
+		rmSync(join(cwd, 'policy/.github/workflows/overlock.yml'));
+		const bootstrap = spawnSync('/bin/bash', ['--noprofile', '--norc', '-c', selection], {encoding:'utf8', env:{PATH:'/usr/bin:/bin', GITHUB_WORKSPACE:cwd}});
+		assert.equal(bootstrap.status, 0, bootstrap.stderr);
+		assert.ok(bootstrap.stdout.includes('::warning::Bootstrap'));
+	} finally { rmSync(cwd, {recursive:true, force:true}); }
 });

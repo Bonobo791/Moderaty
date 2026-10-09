@@ -1,5 +1,5 @@
 import { test as base, expect } from '@playwright/test';
-import { fork } from 'node:child_process';
+import { forkIsolated } from './isolated-child.mjs';
 import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -7,7 +7,7 @@ import { join } from 'node:path';
 
 type RequestRecord = { url: string; method: string };
 export type Snapshot = {
-	handles: { channelId: string; handle: string; resolvedChannelId: string | null }[];
+	handles: { channelId: string; handle: string }[];
 	comments: { id: string; status: string; decidedBy: string; authorName: string | null; authorChannelId: string | null }[];
 	actions: { commentId: string; action: string; state: string }[];
 	audits: { commentId: string; action: string; reason: string; authorHandle: string | null }[];
@@ -39,7 +39,7 @@ export const test = base.extend<{ app: App }>({
 			await writeFile(join(project, name), 'MODERATY_DOTENV_POISON=synthetic-poison\nVITE_MODERATY_DOTENV_POISON=synthetic-poison\nDRY_RUN=true\n');
 		}
 		// Do not inherit credentials, NODE_OPTIONS/preloads or dotenv settings.
-		const child = fork(join(import.meta.dirname, 'server.mjs'), [], {
+		const child = forkIsolated(join(import.meta.dirname, 'server.mjs'), {
 			cwd: project,
 			env: { PATH: process.env.PATH, TMPDIR: directory, NODE_ENV: 'development', MODERATY_E2E_DIRECTORY: directory },
 			stdio: ['ignore', 'pipe', 'pipe', 'ipc']

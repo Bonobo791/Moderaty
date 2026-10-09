@@ -728,7 +728,7 @@ test.each([{}, { items: [] }, { items: [{ id: '' }] }, { items: [{ id: 1 }] }, {
 });
 test('handle lookup rejects provider failure', async () => {
 	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status: 403 })));
-	await expect(resolveHandleChannelId('protected_handle', 'token')).rejects.toThrow('lookup unavailable');
+	await expect(resolveHandleChannelId('protected_handle', 'token')).rejects.toThrow('YouTube handle lookup failed: HTTP 403');
 });
 
 test.each([{ items: [] }])('handle lookup distinguishes zero results from malformed data: %j', async (payload) => {

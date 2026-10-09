@@ -42,7 +42,7 @@ export function auditDiff(diff, { base = 'fixture' } = {}) {
 	const alias = '.moderaty-overlock/vitest.config.ts';
 	const aliased = diff.replace(/^(diff --git a\/|--- a\/|\+\+\+ b\/)vite\.config\.ts(.*)$/gm, (line) => line.replace(/\bvite\.config\.ts\b/g, alias));
 	let produced;
-	analyze({ diff: aliased, base, testGlobs: [/\.probe\.mjs$/], onFindings: (findings) => { produced = findings; } });
+	analyze({ diff: aliased, base, testGlobs: [/\.probe\.mjs$/, /\.pw\.ts$/], onFindings: (findings) => { produced = findings; } });
 	if (!Array.isArray(produced)) throw new Error('Overlock did not produce raw findings');
 	const findings = produced.map((finding) => ({
 		...finding, file: finding.file === alias ? 'vite.config.ts' : finding.file,
@@ -193,7 +193,7 @@ function git(cwd, args) {
 	// resolve a candidate-controlled executable from PATH or the working tree.
 	return execFileSync('/usr/bin/git', ['-c', 'core.fsmonitor=false', ...args], {
 		cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe']
-	}).trimEnd();
+	});
 }
 
 function configAt(cwd, revision, path) {
@@ -208,16 +208,16 @@ function configAt(cwd, revision, path) {
 /** Read immutable git objects only: no npm scripts, test execution or config imports. */
 export function auditRepository({ cwd = process.cwd(), base }) {
 	if (!/^[a-f0-9]{40}$/.test(base ?? '')) throw new Error('Audit base must be a 40-character commit SHA');
-	const head = git(cwd, ['rev-parse', '--verify', 'HEAD^{commit}']);
-	const fork = git(cwd, ['merge-base', base, head]);
-	const diff = git(cwd, ['diff', '--no-ext-diff', '--no-textconv', '--no-renames', '--unified=80', fork, head, '--']);
+	const head = git(cwd, ['rev-parse', '--verify', 'HEAD^{commit}']).trim();
+	const fork = git(cwd, ['merge-base', base, head]).trim();
+	const diff = git(cwd, ['diff', '--text', '--no-ext-diff', '--no-textconv', '--no-renames', '--unified=80', fork, head, '--']);
 	if (diff === '') throw new Error('Audit diff is empty; no clean verdict was produced');
-	const report = auditDiff(`${diff}\n`, { base: fork });
+	const report = auditDiff(diff, { base: fork });
 	const extra = inspectStryker(configAt(cwd, fork, 'stryker.config.json'), configAt(cwd, head, 'stryker.config.json'));
 	const files = git(cwd, ['diff', '--name-only', '-z', fork, head, '--']).split('\0').filter(Boolean).length;
 	const commits = Number(git(cwd, ['rev-list', '--count', `${fork}..${head}`]));
 	return makeReport([...report.findings, ...extra], fork, {
-		head, requested_base: base, patch_sha256: createHash('sha256').update(`${diff}\n`).digest('hex'),
+		head, requested_base: base, patch_sha256: createHash('sha256').update(diff).digest('hex'),
 		scope: { files, commits }, engine_version: '0.10.4', policy: 'moderaty-overlock-v1'
 	});
 }

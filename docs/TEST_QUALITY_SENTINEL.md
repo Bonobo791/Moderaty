@@ -29,7 +29,8 @@ conclusion jobs request `issues: write` and `pull-requests: write` for GitHub's
 comment machinery; they do not check out or execute candidate code. Issue
 failure reports are disabled. All action references are immutable SHAs and
 container images have digests. The main Copilot CLI version is pinned to
-`1.0.87`. The framework's secondary detection engine is compiler-managed.
+`1.0.87`, with explicit `copilot/gpt-5.4` model selection. An unpinned
+`auto` alias selected an unsupported model during the initial live run. The framework's secondary detection engine is compiler-managed.
 
 The collector is checked out separately at the reviewed immutable commit
 `1732d13e76d674d138b2a957a940aa616c5f0a17`. The evidence repository stays

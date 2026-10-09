@@ -725,3 +725,19 @@ test('data-request auth redirects preserve the framework redirect payload and co
 	expect(response.headers.get('x-request-id')).toBe((event.locals as Record<string, unknown>).requestId);
 	expect(response.headers.get('x-robots-tag')).toBe('noindex');
 });
+
+
+test.each(['migration', 'session'])('real %s outages retain safe diagnostics while degrading to maintenance', async (boundary) => {
+	const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+	const failure = new TypeError('synthetic-private-value');
+	(boundary === 'migration' ? mocks.assertMigrationsCurrent : mocks.getSessionUser).mockRejectedValue(failure);
+	const event = makeEvent();
+	const response = await handle({ event, resolve: async () => new Response('maintenance') } as never);
+	expect(await response.text()).toBe('maintenance');
+	expect(event.locals.dbDown).toBe(true);
+	expect(JSON.parse(log.mock.calls[0][0])).toMatchObject({
+		type: boundary === 'migration' ? 'migration_check_failed' : 'session_lookup_failed',
+		category: 'database', errorKind: 'TypeError', errorFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/)
+	});
+	expect(JSON.stringify(log.mock.calls)).not.toContain('synthetic-private-value');
+});

@@ -147,7 +147,7 @@ const handleRequest: Handle = async ({ event, resolve }) => {
 	try {
 		await assertMigrationsCurrent();
 	} catch (e) {
-		emitOperationalEvent({ type: 'migration_check_failed', severity: 'error', category: isHttpError(e) ? 'deployment' : 'database', route: event.route.id, requestId: event.locals.requestId });
+		emitOperationalEvent({ type: 'migration_check_failed', severity: 'error', category: isHttpError(e) ? 'deployment' : 'database', route: event.route.id, requestId: event.locals.requestId, diagnosticError: isHttpError(e) ? undefined : e });
 		if (isHttpError(e)) throw e;
 		event.locals.dbDown = true;
 		event.locals.user = null;
@@ -168,7 +168,7 @@ const handleRequest: Handle = async ({ event, resolve }) => {
 		}
 	} catch (e) {
 		// Correlate controlled failures too; never serialize their error body.
-		emitOperationalEvent({ type: 'session_lookup_failed', severity: 'error', category: isHttpError(e) ? 'integrity' : 'database', route: event.route.id, requestId: event.locals.requestId });
+		emitOperationalEvent({ type: 'session_lookup_failed', severity: 'error', category: isHttpError(e) ? 'integrity' : 'database', route: event.route.id, requestId: event.locals.requestId, diagnosticError: isHttpError(e) ? undefined : e });
 		// A deliberate HttpError (e.g. the account-has-no-org integrity failure)
 		// is NOT an outage: let it fail loudly instead of masking it as
 		// maintenance and signing the user out.

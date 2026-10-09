@@ -18,6 +18,7 @@ checkout: false
 engine:
   id: copilot
   version: '1.0.87'
+  model: copilot/gpt-5.4
   bare: true
   max-continuations: 3
 network:

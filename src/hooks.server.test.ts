@@ -131,7 +131,7 @@ test('a database failure during session lookup degrades to maintenance mode, nev
 	expect(console.error).toHaveBeenCalled();
 });
 
-test.each([new Error('SQLITE_UNKNOWN: S3 storage returned HTTP 500'), undefined])('session query failures log their cause without the cookie token: %s', async (cause) => {
+test.each([new Error('SQLITE_UNKNOWN: S3 storage returned HTTP 500'), undefined])('session query failures log a safe category without the provider cause or cookie token: %s', async (cause) => {
 	const token = 'synthetic-session-cookie';
 	mocks.getSessionUser.mockRejectedValue(new DrizzleQueryError('select * from sessions where id = ?', [token], cause));
 	const log = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -143,7 +143,8 @@ test.each([new Error('SQLITE_UNKNOWN: S3 storage returned HTTP 500'), undefined]
 	expect(event.locals.dbDown).toBe(true);
 	expect(event.locals.user).toBeNull();
 	expect(event.cookies.set).not.toHaveBeenCalled();
-	expect(log).toHaveBeenCalledWith('session lookup failed:', cause ?? 'database query failed');
+	expect(JSON.parse(log.mock.calls[0][0])).toMatchObject({ type: 'session_lookup_failed', severity: 'error', category: 'database', route: '/' });
+	if (cause) expect(JSON.stringify(log.mock.calls)).not.toContain(cause.message);
 	expect(JSON.stringify(log.mock.calls)).not.toContain(token);
 });
 
@@ -205,7 +206,7 @@ test('a database behind the code fails an internal route with the guard 503 befo
 	};
 	const resolve = vi.fn(async () => new Response('ok'));
 
-	await expect(handle({ event, resolve } as never)).rejects.toMatchObject({ status: 503 });
+	expect((await handle({ event, resolve } as never)).status).toBe(503);
 	expect(mocks.getSessionUser).not.toHaveBeenCalled();
 	expect(resolve).not.toHaveBeenCalled();
 });
@@ -293,7 +294,7 @@ test('a deliberate HttpError from session resolution propagates — integrity fa
 	const event = makeEvent();
 	const resolve = vi.fn(async () => new Response('ok'));
 
-	await expect(handle({ event, resolve } as never)).rejects.toMatchObject({ status: 500 });
+	expect((await handle({ event, resolve } as never)).status).toBe(500);
 	expect(event.locals.dbDown).toBeUndefined();
 	expect(resolve).not.toHaveBeenCalled();
 });
@@ -367,7 +368,7 @@ test('a guard-check outage is logged with its identifiable message', async () =>
 
 	await handle({ event, resolve } as never);
 
-	expect(errSpy).toHaveBeenCalledWith('migration guard query failed:', expect.any(Error));
+	expect(JSON.parse(errSpy.mock.calls[0][0])).toMatchObject({ type: 'migration_check_failed', category: 'database' });
 });
 
 test('a session-lookup outage is logged with its identifiable message', async () => {
@@ -378,7 +379,7 @@ test('a session-lookup outage is logged with its identifiable message', async ()
 
 	await handle({ event, resolve } as never);
 
-	expect(errSpy).toHaveBeenCalledWith('session lookup failed:', expect.any(Error));
+	expect(JSON.parse(errSpy.mock.calls[0][0])).toMatchObject({ type: 'session_lookup_failed', category: 'database' });
 });
 
 test.each([
@@ -457,16 +458,12 @@ test('a client that disconnects mid-request logs a warn line, not a fake 500', a
 		message: 'Internal Error'
 	});
 
-	expect(warn).toHaveBeenCalledWith(
-		'request aborted: %s %s — the client disconnected before a response could be sent',
-		'POST',
-		'/channels/UC1/feedback'
-	);
+	expect(JSON.parse(warn.mock.calls[0][0])).toMatchObject({ type: 'request_disconnected', severity: 'warn', category: 'client_disconnect', route: '/(app)/channels/[id]/feedback' });
 	expect(err).not.toHaveBeenCalled();
 	expect(result).toEqual({ message: 'Internal Error' });
 });
 
-test('a real unexpected error keeps the loud [500] + stack log', async () => {
+test('a real unexpected error emits a loud safe category instead of the raw stack', async () => {
 	const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 	const err = vi.spyOn(console, 'error').mockImplementation(() => {});
 	const boom = new Error('db exploded');
@@ -478,7 +475,8 @@ test('a real unexpected error keeps the loud [500] + stack log', async () => {
 		message: 'Internal Error'
 	});
 
-	expect(err).toHaveBeenCalledWith('[%d] %s %s', 500, 'POST', '/channels/UC1/feedback', boom);
+	expect(JSON.parse(err.mock.calls[0][0])).toMatchObject({ type: 'unexpected_server_error', severity: 'error', category: 'unexpected', route: '/(app)/channels/[id]/feedback' });
+	expect(JSON.stringify(err.mock.calls)).not.toContain(boom.message);
 	expect(warn).not.toHaveBeenCalled();
 	expect(result).toEqual({ message: 'Internal Error' });
 });
@@ -498,7 +496,7 @@ test('a framework 404 logs a short warn line, not an error with a stack', async 
 		message: 'Not Found'
 	});
 
-	expect(warn).toHaveBeenCalledWith('[%d] %s %s', 404, 'POST', '/channels/UC1/feedback');
+	expect(JSON.parse(warn.mock.calls[0][0])).toMatchObject({ type: 'request_not_found', severity: 'warn', category: 'not_found' });
 	expect(err).not.toHaveBeenCalled();
 	expect(result).toEqual({ message: 'Not Found' });
 });
@@ -533,5 +531,196 @@ test('the /api/health early return also carries the noindex header', async () =>
 
 	const response = await handle({ event, resolve } as never);
 
+	expect(response.headers.get('x-robots-tag')).toBe('noindex');
+});
+
+test.each(['/', '/api/health', '/(app)/dashboard'])('server correlation reaches %s response and locals before checks', async (routeId) => {
+	const event = { ...makeEvent(), route: { id: routeId }, request: new Request('http://localhost/?token=synthetic-private-value', { headers: { 'X-Request-ID': 'client-controlled-secret' } }) };
+	const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+	mocks.assertMigrationsCurrent.mockImplementation(async () => {
+		expect((event.locals as Record<string, unknown>).requestId).toMatch(/^[0-9a-f-]{36}$/);
+	});
+	mocks.getSessionUser.mockResolvedValue(null);
+	const resolve = vi.fn(async (resolvedEvent) => {
+		expect(resolvedEvent.locals.requestId).toMatch(/^[0-9a-f-]{36}$/);
+		return new Response('original response', { status: routeId === '/api/health' ? 503 : 200 });
+	});
+	const response = await handle({ event, resolve } as never);
+	expect(await response.text()).toBe('original response');
+	expect(response.status).toBe(routeId === '/api/health' ? 503 : 200);
+	expect(response.headers.get('x-request-id')).toBe((event.locals as Record<string, unknown>).requestId);
+	expect(response.headers.get('x-request-id')).not.toBe('client-controlled-secret');
+	expect(errorLog).not.toHaveBeenCalled();
+});
+
+test.each(['migration', 'session'])('%s outage uses a safe event with the response correlation and unchanged maintenance outcome', async (boundary) => {
+	const secret = 'synthetic-private-value';
+	const cause = new DrizzleQueryError('select * from sessions where token=?', [secret], new Error('https://private.invalid/?token=' + secret + ' person@example.invalid comment-body payment-data'));
+	(boundary === 'migration' ? mocks.assertMigrationsCurrent : mocks.getSessionUser).mockRejectedValue(cause);
+	const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+	const event = { ...makeEvent(), route: { id: '/(app)/channels/[id]' }, url: new URL('http://localhost/channels/private-id?token=' + secret) };
+	const response = await handle({ event, resolve: async () => new Response('maintenance', { status: 200 }) } as never);
+	expect(await response.text()).toBe('maintenance');
+	expect(event.locals.dbDown).toBe(true);
+	expect(event.locals.user).toBeNull();
+	expect(response.headers.get('x-robots-tag')).toBe('noindex');
+	const logged = JSON.stringify(errorLog.mock.calls);
+	for (const sample of [secret, 'person@example.invalid', 'comment-body', 'payment-data', 'private-id', 'select *']) expect(logged).not.toContain(sample);
+	expect(JSON.parse(errorLog.mock.calls[0][0])).toMatchObject({ requestId: response.headers.get('x-request-id'), route: '/(app)/channels/[id]', category: 'database', severity: 'error' });
+});
+
+test('broken logging sinks preserve a maintenance response', async () => {
+	mocks.getSessionUser.mockRejectedValue(new Error('synthetic-private-value'));
+	vi.spyOn(console, 'error').mockImplementation(() => { throw new Error('sink failed'); });
+	const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+	const event = makeEvent();
+	const response = await handle({ event, resolve: async () => new Response('maintenance') } as never);
+	expect(await response.text()).toBe('maintenance');
+	expect(event.locals.dbDown).toBe(true);
+	expect(stderr).toHaveBeenCalledWith('operational logging failed\n');
+});
+
+test.each([['migration', 503], ['session', 500]])('deliberate %s failures retain status, safe message, noindex and request header', async (boundary, status) => {
+	const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+	let failure;
+	try { error(status as number, 'Controlled failure'); } catch (e) { failure = e; }
+	(boundary === 'migration' ? mocks.assertMigrationsCurrent : mocks.getSessionUser).mockRejectedValue(failure);
+	const event = { ...makeEvent(), route: { id: '/(app)/dashboard' }, request: new Request('http://localhost/dashboard', { headers: { accept: 'application/json' } }) };
+	const resolve = vi.fn();
+	const response = await handle({ event, resolve } as never);
+	expect(response.status).toBe(status);
+	expect(await response.json()).toEqual({ message: 'Controlled failure' });
+	expect(response.headers.get('x-request-id')).toBe((event.locals as Record<string, unknown>).requestId);
+	expect(response.headers.get('x-robots-tag')).toBe('noindex');
+	expect(event.locals.dbDown).toBeUndefined();
+	expect(resolve).not.toHaveBeenCalled();
+	expect(errorLog).toHaveBeenCalledTimes(1);
+	expect(JSON.parse(errorLog.mock.calls[0][0])).toMatchObject({
+		type: boundary === 'migration' ? 'migration_check_failed' : 'session_lookup_failed',
+		severity: 'error', category: 'database', route: '/(app)/dashboard',
+		requestId: response.headers.get('x-request-id')
+	});
+	expect(JSON.stringify(errorLog.mock.calls)).not.toContain('Controlled failure');
+});
+
+test('concurrent requests get distinct server IDs and leave authentication redirects intact', async () => {
+	mocks.getSessionUser.mockResolvedValue(null);
+	const responses = await Promise.all(Array.from({ length: 8 }, () => handle({ event: { ...makeEvent(), route: { id: '/(app)/dashboard' } }, resolve: async () => new Response(null, { status: 302, headers: { location: '/login' } }) } as never)));
+	expect(new Set(responses.map((r) => r.headers.get('x-request-id'))).size).toBe(8);
+	for (const response of responses) {
+		expect(response.status).toBe(302);
+		expect(response.headers.get('location')).toBe('/login');
+		expect(response.headers.get('x-robots-tag')).toBe('noindex');
+	}
+});
+
+test('unexpected resolve errors retain a generic outcome and correlated event even with hostile error metadata', async () => {
+	const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+	const hostile = Object.defineProperty({}, 'message', { get() { throw new Error('synthetic-private-value'); } });
+	const event = { ...makeEvent(), request: new Request('http://localhost/?token=synthetic-private-value', { headers: { accept: 'application/json' } }) };
+	const response = await handle({ event, resolve: async () => { throw hostile; } } as never);
+	expect(response.status).toBe(500);
+	expect(await response.json()).toEqual({ message: 'Internal Error' });
+	expect(JSON.parse(errorLog.mock.calls[0][0])).toMatchObject({ requestId: response.headers.get('x-request-id'), type: 'unexpected_server_error', category: 'unexpected' });
+	expect(JSON.stringify(errorLog.mock.calls)).not.toContain('synthetic-private-value');
+});
+
+test('a controlled HTML failure stays localized and escapes its message', async () => {
+	let failure;
+	try { error(503, '<script>synthetic-private-value</script>'); } catch (e) { failure = e; }
+	mocks.assertMigrationsCurrent.mockRejectedValue(failure);
+	const event = { ...makeEvent(), route: { id: '/login' }, url: new URL('http://localhost/login'), cookies: { get: () => 'pt-BR', set: vi.fn() }, request: new Request('http://localhost/login') };
+	const response = await handle({ event, resolve: vi.fn() } as never);
+	const html = await response.text();
+	expect(response.status).toBe(503);
+	expect(html).toContain('<html lang="pt-BR">');
+	expect(html).toContain('&lt;script&gt;synthetic-private-value&lt;/script&gt;');
+	expect(html).not.toContain('<script>');
+	expect(response.headers.get('content-type')).toBe('text/html; charset=utf-8');
+	expect(response.headers.get('x-request-id')).toMatch(/^[0-9a-f-]{36}$/);
+});
+
+test('immutable redirect headers and existing cookies survive correlation', async () => {
+	mocks.getSessionUser.mockResolvedValue(null);
+	const redirected = await handle({ event: makeEvent(), resolve: async () => Response.redirect('http://localhost/login', 302) } as never);
+	expect(redirected.status).toBe(302);
+	expect(redirected.headers.get('location')).toBe('http://localhost/login');
+	const response = await handle({ event: makeEvent(), resolve: async () => new Response('ok', { headers: [['set-cookie', 'one=synthetic; HttpOnly'], ['set-cookie', 'two=synthetic; HttpOnly'], ['X-Request-ID', 'client-controlled-secret']] }) } as never);
+	expect(response.headers.getSetCookie()).toEqual(['one=synthetic; HttpOnly', 'two=synthetic; HttpOnly']);
+	expect(response.headers.get('x-request-id')).not.toBe('client-controlled-secret');
+});
+
+test.each([
+	'application/json;q=0, text/html',
+	'text/html, application/json;q=0.2',
+	'application/json;q=0, application/*;q=1, text/html;q=0.5',
+	'application/json;q=0.2, application/*;q=1, text/html;q=0.5'
+])('controlled errors honor HTML preference: %s', async (accept) => {
+	let failure;
+	try { error(503, 'Controlled failure'); } catch (e) { failure = e; }
+	mocks.assertMigrationsCurrent.mockRejectedValue(failure);
+	const event = { ...makeEvent(), request: new Request('http://localhost/', { headers: { accept } }) };
+	const response = await handle({ event, resolve: vi.fn() } as never);
+	expect(response.status).toBe(503);
+	expect(response.headers.get('content-type')).toBe('text/html; charset=utf-8');
+});
+
+test.each(['*/*', 'application/*', 'application/json;q=0.8, text/html;q=0.2', 'application/json ; q=0.8, text/html;q=0.2', 'text/html;q=0, text/*;q=1, application/json;q=0.5'])('controlled errors honor JSON preference: %s', async (accept) => {
+	let failure;
+	try { error(503, 'Controlled failure'); } catch (e) { failure = e; }
+	mocks.assertMigrationsCurrent.mockRejectedValue(failure);
+	const event = { ...makeEvent(), request: new Request('http://localhost/', { headers: { accept } }) };
+	const response = await handle({ event, resolve: vi.fn() } as never);
+	expect(response.status).toBe(503);
+	expect(response.headers.get('content-type')).toBe('application/json');
+	expect(await response.json()).toEqual({ message: 'Controlled failure' });
+});
+
+test('data requests keep controlled errors as JSON despite an HTML Accept header', async () => {
+	let failure;
+	try { error(503, 'Controlled failure'); } catch (e) { failure = e; }
+	mocks.assertMigrationsCurrent.mockRejectedValue(failure);
+	const event = { ...makeEvent(), isDataRequest: true, request: new Request('http://localhost/', { headers: { accept: 'text/html' } }) };
+	const response = await handle({ event, resolve: vi.fn() } as never);
+	expect(response.status).toBe(503);
+	expect(await response.json()).toEqual({ message: 'Controlled failure' });
+	expect(response.headers.get('x-request-id')).toMatch(/^[0-9a-f-]{36}$/);
+});
+
+test.each(['"same-page"', 'W/"same-page"', '*', '"other", "same-page"', 'W/"other", W/"same-page"'])('conditional responses preserve correlation and noindex: %s', async (ifNoneMatch) => {
+	mocks.getSessionUser.mockResolvedValue(null);
+	const event = { ...makeEvent(), route: { id: '/(app)/dashboard' }, request: new Request('http://localhost/dashboard', { headers: { 'if-none-match': ifNoneMatch } }) };
+	const response = await handle({ event, resolve: async () => new Response('unchanged page', { headers: { etag: '"same-page"', 'cache-control': 'private, max-age=0', 'set-cookie': 'one=synthetic; HttpOnly', 'content-type': 'text/html' } }) } as never);
+	expect(response.status).toBe(304);
+	expect(await response.text()).toBe('');
+	expect(response.headers.get('x-request-id')).toBe((event.locals as Record<string, unknown>).requestId);
+	expect(response.headers.get('x-robots-tag')).toBe('noindex');
+	expect(response.headers.get('etag')).toBe('"same-page"');
+	expect(response.headers.get('cache-control')).toBe('private, max-age=0');
+	expect(response.headers.get('set-cookie')).toBe('one=synthetic; HttpOnly');
+	expect(response.headers.get('content-type')).toBeNull();
+});
+
+test.each(['"other"', '"same-page-extra"', '"prefix,same-page"'])('nonmatching conditional tags keep the response body: %s', async (ifNoneMatch) => {
+	mocks.getSessionUser.mockResolvedValue(null);
+	const event = { ...makeEvent(), request: new Request('http://localhost/', { headers: { 'if-none-match': ifNoneMatch } }) };
+	const response = await handle({ event, resolve: async () => new Response('changed page', { headers: { etag: '"same-page"' } }) } as never);
+	expect(response.status).toBe(200);
+	expect(await response.text()).toBe('changed page');
+	expect(response.headers.get('x-request-id')).toMatch(/^[0-9a-f-]{36}$/);
+});
+
+test('data-request auth redirects preserve the framework redirect payload and correlation', async () => {
+	mocks.getSessionUser.mockResolvedValue(null);
+	const event = { ...makeEvent(), route: { id: '/(app)/dashboard' }, isDataRequest: true, request: new Request('http://localhost/dashboard', { headers: { 'if-none-match': '"old"' } }) };
+	const response = await handle({ event, resolve: async () => new Response(null, { status: 302, headers: { location: '/login', 'content-type': 'text/html', 'content-length': '99', 'cache-control': 'public, max-age=3600', etag: '"old"' } }) } as never);
+	expect(response.status).toBe(200);
+	const payload = await response.text();
+	expect(JSON.parse(payload)).toEqual({ type: 'redirect', location: '/login' });
+	expect(response.headers.get('content-type')).toBe('application/json');
+	expect(response.headers.get('content-length')).toBe(String(Buffer.byteLength(payload)));
+	expect(response.headers.get('cache-control')).toBe('private, no-store');
+	expect(response.headers.get('etag')).toBeNull();
+	expect(response.headers.get('x-request-id')).toBe((event.locals as Record<string, unknown>).requestId);
 	expect(response.headers.get('x-robots-tag')).toBe('noindex');
 });

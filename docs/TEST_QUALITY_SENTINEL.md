@@ -42,7 +42,7 @@ container images have digests. The main Copilot CLI version is pinned to
 `auto` alias selected an unsupported model during the initial live run. The framework's secondary detection engine is compiler-managed.
 
 The collector is checked out separately at the reviewed immutable commit
-`1732d13e76d674d138b2a957a940aa616c5f0a17`. The evidence repository stays
+`81ea1fd9aee316893c2c4a22de4ea75644be8ca8`. The evidence repository stays
 at the event's base SHA. The collector fetches the PR head
 as Git data, verifies the fetched SHA and compares from the merge base. It never
 checks out, imports or runs candidate files. Credentials are not persisted by

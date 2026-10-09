@@ -61,11 +61,13 @@ include/exclude scope checking. No config code executes.
 Added Vitest `it/test/describe/suite.skipIf(...)` or `.runIf(...)` declarations
 also block through a supplemental detector. It flags direct declarations even
 when the condition currently allows execution, since a later environment can
-skip them. Dynamic aliases and indirect helper calls still require review.
+skip them. Declarations spanning added and unchanged lines are included.
+Dynamic aliases and indirect helper calls still require review.
 
 Supplemental JSON comparisons cover the actual `stryker.config.json`: lowered
 or removed `high`, `low` or `break` thresholds; removed positive mutation
-patterns; and added exclusions. Replacing a positive pattern requests review
+patterns; removal of explicit mutation scope or its config; and added
+exclusions. Replacing a positive pattern requests review
 even when a maintainer intends an equivalent rewrite. Invalid config or an
 unsupported config object fails loudly. A config with object-valued `mutate`
 entries requires a reviewed adapter update before it can pass.
@@ -90,11 +92,13 @@ node scripts/overlock/audit.mjs check --base <40-character-base-commit-SHA> --js
 
 The audit reads committed objects, not uncommitted edits. A GitHub run uses the
 exact PR head checkout. Local changes need a local commit before this command
-can judge them.
+can judge them. The adapter and probes use `/usr/bin/git` directly, matching
+the supported Ubuntu runner. Local verification requires that executable;
+candidate changes to `PATH` cannot substitute their own Git program.
 
 On October 9, 2026:
 
-- All 32 dedicated probes passed. They include deleted files/cases, skip/only/todo,
+- All 38 dedicated probes passed after review fixes. They include deleted files/cases, skip/only/todo,
   conditional skip/run declarations,
   weakened/removed assertions, reduced objects/data, runner filters, coverage
   reductions, disabled CI, and Stryker threshold/scope changes.
@@ -103,11 +107,18 @@ On October 9, 2026:
 - A real temporary git repository proved that configuration, commit/PR
   allowances and hostile package scripts cannot clear a skip or execute the
   application. Invalid bases and empty diffs failed.
+- A review regression first demonstrated that an executable supplied through
+  `PATH` ran in place of Git. Calling `/usr/bin/git` directly made the same
+  probe retain the blocking verdict without executing the hostile program.
+- Five new review regressions failed for multiline conditional declarations
+  and removed Stryker scope/config, then passed after the detector fixes. An
+  additional benign control accepts unrelated edits beside an unchanged
+  conditional declaration.
 - The pinned composite action's analysis shell step accepted a legitimate
   change (status 0), rejected a skipped-test change (status 1), and failed on
   empty analysis (status 2). Its final failure step exited 1 for a failed report.
   These were local action-contract runs, not hosted GitHub Actions runs.
-- Deliberately replacing the detector with an always-green result caused 21
+- Against the original 32 controls, deliberately replacing the detector with an always-green result caused 21
   probe failures. An always-blocking result caused 5 failures. Removing the
   Vite alias caused 2 failures; removing the conditional-skip detector caused
   2 failures. No committed test or production file was weakened.
@@ -115,8 +126,9 @@ On October 9, 2026:
 
 These fixtures establish behavior for the labeled examples, not a general
 detection rate. The audit does not execute application behavior or assess intent.
-Hosted CI and bot review remain
-pending until the owner authorizes push and PR creation.
+The initial hosted Overlock audit passed on draft PR #221. Hosted security
+scanner findings and bot review are being triaged; this draft is not ready
+for integration.
 
 ## Require the owner's permission for CI changes
 

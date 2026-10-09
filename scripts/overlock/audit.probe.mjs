@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,6 +22,8 @@ const weakening = [
 	['todo', 'src/auth.test.ts', exact, "it.todo('rejects expired tokens');", 'TEST_SKIPPED_ADDED'],
 	['conditional skip', 'src/auth.test.ts', exact, exact.replace('it(', 'it.skipIf(true)('), 'TEST_SKIPPED_ADDED'],
 	['conditional run', 'src/auth.test.ts', exact, exact.replace('it(', 'it.runIf(false)('), 'TEST_SKIPPED_ADDED'],
+	['multiline conditional skip', 'src/auth.test.ts', exact, exact.replace('it(', 'it\n .skipIf(true)\n ('), 'TEST_SKIPPED_ADDED'],
+	['multiline conditional run', 'src/auth.test.ts', exact, exact.replace('it(', 'it\n .runIf(false)\n ('), 'TEST_SKIPPED_ADDED'],
 	['loose assertion', 'src/auth.test.ts', exact, exact.replace('toBe(false)', 'toBeDefined()'), 'ASSERTION_WEAKENED'],
 	['removed assertion', 'src/auth.test.ts', exact, "it('rejects expired tokens', () => { });", 'ASSERTION_REMOVED'],
 	['case deletion', 'src/auth.test.ts', `${exact}\nit('checks owner', () => { expect(owner).toBe('Andrew'); });`, exact, 'TEST_REMOVED'],
@@ -57,6 +59,16 @@ test('inline suppressions cannot clear a skip', () => {
 	assert.ok(report.findings.some((finding) => finding.rule === 'TEST_SKIPPED_ADDED'));
 });
 
+test('blocks a conditional skip attached to an unchanged declaration line', () => {
+	const diff = `diff --git a/src/auth.test.ts b/src/auth.test.ts\n--- a/src/auth.test.ts\n+++ b/src/auth.test.ts\n@@ -1,2 +1,3 @@\n it\n+ .skipIf(true)\n ('case', () => { expect(valid).toBe(false); });\n`;
+	assert.equal(auditDiff(diff).ok, false);
+});
+
+test('accepts an unrelated edit beside an unchanged conditional declaration', () => {
+	const diff = `diff --git a/src/auth.test.ts b/src/auth.test.ts\n--- a/src/auth.test.ts\n+++ b/src/auth.test.ts\n@@ -1,3 +1,4 @@\n it\n  .skipIf(true)\n  ('case', () => { expect(valid).toBe(false); });\n+ // Document the existing case.\n`;
+	assert.equal(auditDiff(diff).ok, true);
+});
+
 for (const [name, before, after] of [
 	['stronger assertion', "it('checks role', () => { expect(role).toBeDefined(); });", "it('checks role', () => { expect(role).toBe('admin'); });"],
 	['additional case', exact, `${exact}\nit('checks owner', () => { expect(owner).toBe('Andrew'); });`],
@@ -86,6 +98,14 @@ for (const [name, before, after, rule] of [
 	});
 }
 
+test('removing explicit mutation scope requires review', () => {
+	assert.ok(inspectStryker('{"mutate":["src/**/*.ts"]}', '{}').some((finding) => finding.rule === 'SUITE_SCOPE_NARROWED'));
+});
+
+test('deleting Stryker config requires scope review', () => {
+	assert.ok(inspectStryker('{"mutate":["src/**/*.ts"]}', null).some((finding) => finding.rule === 'SUITE_SCOPE_NARROWED'));
+});
+
 test('accepts raised Stryker threshold and expanded mutation scope', () => {
 	assert.deepEqual(inspectStryker('{"thresholds":{"break":80},"mutate":["src/**/*.ts"]}', '{"thresholds":{"break":90},"mutate":["src/**/*.ts","netlify/**/*.mjs"]}'), []);
 });
@@ -93,7 +113,7 @@ test('accepts raised Stryker threshold and expanded mutation scope', () => {
 test('invalid Stryker JSON fails loudly', () => assert.throws(() => inspectStryker('{}', '{'), /Stryker/));
 
 function git(cwd, ...args) {
-	const result = spawnSync('git', args, { cwd, encoding: 'utf8' });
+	const result = spawnSync('/usr/bin/git', args, { cwd, encoding: 'utf8' });
 	assert.equal(result.status, 0, result.stderr);
 	return result.stdout.trim();
 }
@@ -131,6 +151,17 @@ test('audits real commits despite repo config, commit allowances and hostile pac
 		assert.equal(result.status, 1, result.stderr);
 		assert.equal(JSON.parse(result.stdout).ok, false);
 		assert.equal(JSON.parse(result.stdout).fail_on, 'high');
+		// A candidate must not supply the Git executable through PATH.
+		const hostileBin = join(cwd, 'hostile-bin');
+		mkdirSync(hostileBin);
+		writeFileSync(join(hostileBin, 'git'), '#!/bin/sh\nprintf invoked > EXECUTED_GIT\nexit 91\n');
+		chmodSync(join(hostileBin, 'git'), 0o755);
+		const hostile = spawnSync(process.execPath, [fileURLToPath(new URL('./audit.mjs', import.meta.url)),
+			'check', '--base', base, '--json'
+		], { cwd, encoding: 'utf8', env: { ...process.env, PATH: hostileBin } });
+		assert.equal(hostile.status, 1, hostile.stderr);
+		assert.equal(JSON.parse(hostile.stdout).ok, false);
+		assert.equal(existsSync(join(cwd, 'EXECUTED_GIT')), false);
 	} finally { rmSync(cwd, { recursive: true, force: true }); }
 });
 

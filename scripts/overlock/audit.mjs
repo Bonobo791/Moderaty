@@ -48,20 +48,36 @@ export function auditDiff(diff, { base = 'fixture' } = {}) {
 		id: finding.id.replace(alias, 'vite.config.ts'),
 		severity: blockingRules.has(finding.rule) ? 'high' : finding.severity
 	}));
-	// Vitest conditional declarations are not recognized by this upstream
-	// release. Flag their introduction without evaluating the condition.
-	for (const file of parseDiff(diff)) {
-		if (!isTestFile(file.path, [/\.probe\.mjs$/])) continue;
-		for (const hunk of file.hunks) for (const line of hunk.lines) {
-			if (line.kind !== 'add' || !/^\s*(?:it|test|describe|suite)\s*\.\s*(?:skipIf|runIf)\s*\(/.test(line.text)) continue;
-			findings.push({
-				id: `TEST_SKIPPED_ADDED:${file.path}:${line.newLine}`, rule: 'TEST_SKIPPED_ADDED', severity: 'high',
-				file: file.path, line: line.newLine, message: 'Conditional skip/run declaration added; test execution now depends on a condition.',
-				evidence: { after: line.text }, fix_hint: 'Run the test unconditionally or obtain a separately reviewed policy change.'
-			});
-		}
+	return makeReport([...findings, ...conditionalSkips(diff)], base);
+}
+
+function conditionalHunk(file, hunk) {
+	let offset = 0;
+	const lines = hunk.lines.filter((line) => line.kind !== 'del').map((line) => {
+		const entry = { ...line, start: offset, end: offset + line.text.length };
+		offset = entry.end + 1;
+		return entry;
+	});
+	const source = lines.map((line) => line.text).join('\n');
+	// Leading horizontal whitespace cannot span repeated line starts. Token
+	// separators accept newlines so a declaration may span added/context lines.
+	const declarations = /^[ \t]*(?:it|test|describe|suite)\s*\.\s*(?:skipIf|runIf)\s*\(/gm;
+	const findings = [];
+	for (const match of source.matchAll(declarations)) {
+		const added = lines.find((line) => line.kind === 'add' && line.end >= match.index && line.start < match.index + match[0].length);
+		if (!added) continue;
+		findings.push({
+			id: `TEST_SKIPPED_ADDED:${file}:${added.newLine}`, rule: 'TEST_SKIPPED_ADDED', severity: 'high',
+			file, line: added.newLine, message: 'Conditional skip/run declaration added; test execution now depends on a condition.',
+			evidence: { after: match[0] }, fix_hint: 'Run the test unconditionally or obtain a separately reviewed policy change.'
+		});
 	}
-	return makeReport(findings, base);
+	return findings;
+}
+
+function conditionalSkips(diff) {
+	return parseDiff(diff).filter((file) => isTestFile(file.path, [/\.probe\.mjs$/]))
+		.flatMap((file) => file.hunks.flatMap((hunk) => conditionalHunk(file.path, hunk)));
 }
 
 function supplemental(rule, key, message) {
@@ -98,6 +114,9 @@ export function inspectStryker(beforeText, afterText) {
 		const next = after.thresholds?.[key];
 		if (next === undefined || next < old) findings.push(supplemental('COVERAGE_THRESHOLD_LOWERED', key, `Stryker ${key} changed from ${old} to ${next ?? 'absent'}.`));
 	}
+	if (before.mutate !== undefined && after.mutate === undefined) {
+		findings.push(supplemental('SUITE_SCOPE_NARROWED', 'mutate', 'Explicit Stryker mutation scope was removed; review the resulting defaults or missing gate.'));
+	}
 	if (after.mutate !== undefined) {
 		const old = before.mutate ?? [];
 		const removed = old.filter((pattern) => !pattern.startsWith('!') && !after.mutate.includes(pattern));
@@ -110,7 +129,9 @@ export function inspectStryker(beforeText, afterText) {
 }
 
 function git(cwd, args) {
-	return execFileSync('git', ['-c', 'core.fsmonitor=false', ...args], {
+	// The supported Ubuntu runner supplies this OS-owned executable. Do not
+	// resolve a candidate-controlled executable from PATH or the working tree.
+	return execFileSync('/usr/bin/git', ['-c', 'core.fsmonitor=false', ...args], {
 		cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe']
 	}).trimEnd();
 }

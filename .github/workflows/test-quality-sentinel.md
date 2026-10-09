@@ -47,7 +47,7 @@ steps:
     uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
     with:
       repository: Bonobo791/Moderaty
-      ref: 84fe6a154fb97c093549fa9cc121b88b636122b2
+      ref: 4bb3972f18493c134465ee30a85bcc0a8fe0e2f1
       path: .sentinel-collector
       sparse-checkout: scripts/test-quality-context.mjs
       sparse-checkout-cone-mode: false

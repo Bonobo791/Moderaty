@@ -51,6 +51,50 @@ export function auditDiff(diff, { base = 'fixture' } = {}) {
 	return makeReport([...findings, ...conditionalSkips(diff)], base);
 }
 
+function quotedEnd(source, start) {
+	const quote = source[start];
+	for (let index = start + 1; index < source.length; index += 1) {
+		if (source[index] === '\\') index += 1;
+		else if (source[index] === quote) return index + 1;
+	}
+	return source.length;
+}
+
+function nonCodeEnd(source, index) {
+	if (source[index] === '"' || source[index] === "'") return quotedEnd(source, index);
+	if (source.startsWith('//', index)) {
+		const end = source.indexOf('\n', index + 2);
+		return end < 0 ? source.length : end + 1;
+	}
+	if (source.startsWith('/*', index)) {
+		const end = source.indexOf('*/', index + 2);
+		return end < 0 ? source.length : end + 2;
+	}
+	return null;
+}
+
+function conditionEnd(source, start) {
+	let depth = 1;
+	let index = start;
+	while (index < source.length) {
+		const skipped = nonCodeEnd(source, index);
+		if (skipped !== null) {
+			index = skipped;
+			continue;
+		}
+		const char = source[index];
+		// Regex/division and template expressions need a full JS parser.
+		// Conservatively review edits through the hunk rather than stop at
+		// a possible parenthesis inside an opaque expression.
+		if (char === '/' || char === '`') return source.length;
+		if (char === '(') depth += 1;
+		if (char === ')') depth -= 1;
+		index += 1;
+		if (depth === 0) return index;
+	}
+	return source.length;
+}
+
 function conditionalHunk(file, hunk) {
 	let offset = 0;
 	const lines = hunk.lines.filter((line) => line.kind !== 'del').map((line) => {
@@ -64,12 +108,13 @@ function conditionalHunk(file, hunk) {
 	const declarations = /^[ \t]*(?:it|test|describe|suite)\s*\.\s*(?:skipIf|runIf)\s*\(/gm;
 	const findings = [];
 	for (const match of source.matchAll(declarations)) {
-		const added = lines.find((line) => line.kind === 'add' && line.end >= match.index && line.start < match.index + match[0].length);
+		const end = conditionEnd(source, match.index + match[0].length);
+		const added = lines.find((line) => line.kind === 'add' && line.end >= match.index && line.start < end);
 		if (!added) continue;
 		findings.push({
 			id: `TEST_SKIPPED_ADDED:${file}:${added.newLine}`, rule: 'TEST_SKIPPED_ADDED', severity: 'high',
-			file, line: added.newLine, message: 'Conditional skip/run declaration added; test execution now depends on a condition.',
-			evidence: { after: match[0] }, fix_hint: 'Run the test unconditionally or obtain a separately reviewed policy change.'
+			file, line: added.newLine, message: 'Conditional skip/run declaration or condition changed; test execution depends on this condition.',
+			evidence: { after: source.slice(match.index, end) }, fix_hint: 'Run the test unconditionally or obtain a separately reviewed policy change.'
 		});
 	}
 	return findings;

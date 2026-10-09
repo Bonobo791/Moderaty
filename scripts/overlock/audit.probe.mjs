@@ -69,6 +69,23 @@ test('accepts an unrelated edit beside an unchanged conditional declaration', ()
 	assert.equal(auditDiff(diff).ok, true);
 });
 
+for (const [method, before, after] of [
+	['skipIf', 'false', 'true'], ['runIf', 'true', 'false'],
+	['skipIf', 'predicate(false)', 'predicate(true)'],
+	['skipIf', '\")\" === value && false', '\")\" === value && true'],
+	['skipIf', '/* ) */ false', '/* ) */ true']
+]) {
+	test(`blocks condition-only ${method} edit: ${before}`, () => {
+		const diff = `diff --git a/src/auth.test.ts b/src/auth.test.ts\n--- a/src/auth.test.ts\n+++ b/src/auth.test.ts\n@@ -1,3 +1,3 @@\n it.${method}(\n- ${before}\n+ ${after}\n )('case', () => { expect(valid).toBe(false); });\n`;
+		assert.equal(auditDiff(diff).ok, false);
+	});
+}
+
+test('accepts unrelated body edits after a multiline conditional argument', () => {
+	const diff = `diff --git a/src/auth.test.ts b/src/auth.test.ts\n--- a/src/auth.test.ts\n+++ b/src/auth.test.ts\n@@ -1,5 +1,6 @@\n it.skipIf(\n  predicate(\")\") /* ) */\n )('case', () => {\n+ // Describe the unchanged assertion.\n  expect(valid).toBe(false);\n });\n`;
+	assert.equal(auditDiff(diff).ok, true);
+});
+
 for (const [name, before, after] of [
 	['stronger assertion', "it('checks role', () => { expect(role).toBeDefined(); });", "it('checks role', () => { expect(role).toBe('admin'); });"],
 	['additional case', exact, `${exact}\nit('checks owner', () => { expect(owner).toBe('Andrew'); });`],

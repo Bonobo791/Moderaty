@@ -61,7 +61,11 @@ include/exclude scope checking. No config code executes.
 Added Vitest `it/test/describe/suite.skipIf(...)` or `.runIf(...)` declarations
 also block through a supplemental detector. It flags direct declarations even
 when the condition currently allows execution, since a later environment can
-skip them. Declarations spanning added and unchanged lines are included.
+skip them. Declarations spanning added and unchanged lines are included, along
+with argument-only changes inside existing multiline declarations. The span
+scanner handles nested parentheses, quoted strings and comments without
+executing code. Regex/division and template expressions are conservatively
+scoped to the rest of the hunk, so unrelated edits there can require review.
 Dynamic aliases and indirect helper calls still require review.
 
 Supplemental JSON comparisons cover the actual `stryker.config.json`: lowered
@@ -98,7 +102,7 @@ candidate changes to `PATH` cannot substitute their own Git program.
 
 On October 9, 2026:
 
-- All 38 dedicated probes passed after review fixes. They include deleted files/cases, skip/only/todo,
+- All 44 dedicated probes passed after review fixes. They include deleted files/cases, skip/only/todo,
   conditional skip/run declarations,
   weakened/removed assertions, reduced objects/data, runner filters, coverage
   reductions, disabled CI, and Stryker threshold/scope changes.
@@ -114,6 +118,9 @@ On October 9, 2026:
   and removed Stryker scope/config, then passed after the detector fixes. An
   additional benign control accepts unrelated edits beside an unchanged
   conditional declaration.
+- Five condition-only review probes failed before the next fix, then passed
+  for skip/run, nested calls, quoted parentheses and comments. A benign control
+  still accepts unrelated body edits after a complete multiline condition.
 - The pinned composite action's analysis shell step accepted a legitimate
   change (status 0), rejected a skipped-test change (status 1), and failed on
   empty analysis (status 2). Its final failure step exited 1 for a failed report.
@@ -126,9 +133,10 @@ On October 9, 2026:
 
 These fixtures establish behavior for the labeled examples, not a general
 detection rate. The audit does not execute application behavior or assess intent.
-The initial hosted Overlock audit passed on draft PR #221. Hosted security
-scanner findings and bot review are being triaged; this draft is not ready
-for integration.
+Hosted Overlock, application validation, SonarCloud, CodeQL and Semgrep passed
+on PR #221 at commit `cc49bc5`. Further review changes remain local pending
+owner approval to push. Scanner/review limitations are recorded on the PR;
+these checks do not establish integration readiness.
 
 ## Require the owner's permission for CI changes
 

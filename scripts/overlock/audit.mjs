@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -12,7 +12,8 @@ const engineHashes = {
 	'evaluation.js': '8476c19df0c204c0df9eed04b731f019568a5c347e6891144da4d3eba4b68406'
 };
 for (const [file, hash] of Object.entries(engineHashes)) {
-	if (createHash('sha256').update(readFileSync(resolve(dirname(modulePath), file))).digest('hex') !== hash) {
+	const actual = createHash('sha256').update(readFileSync(resolve(dirname(modulePath), file))).digest();
+	if (!timingSafeEqual(actual, Buffer.from(hash, 'hex'))) {
 		throw new Error(`Overlock engine integrity failed: ${file}`);
 	}
 }

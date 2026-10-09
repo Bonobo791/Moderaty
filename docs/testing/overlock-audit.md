@@ -36,7 +36,8 @@ The independently published engine is `overlock@0.10.4`, installed with
 directory outside the candidate checkout. The lock records the tarball's SHA-512
 integrity. The adapter verifies the reviewed `dist/index.js` and
 `dist/evaluation.js` SHA-256 hashes before importing either file. The engine has
-no runtime dependencies. The action's default `latest` install path is unused.
+no runtime dependencies. SHA-256 digest buffers use `timingSafeEqual` against
+the public pinned digests. The action's default `latest` install path is unused.
 Moderaty's root package manifest and lock stay unchanged.
 
 ## Enforcement policy
@@ -102,7 +103,7 @@ candidate changes to `PATH` cannot substitute their own Git program.
 
 On October 9, 2026:
 
-- All 44 dedicated probes passed after review fixes. They include deleted files/cases, skip/only/todo,
+- All 46 dedicated probes passed after review fixes. They include deleted files/cases, skip/only/todo,
   conditional skip/run declarations,
   weakened/removed assertions, reduced objects/data, runner filters, coverage
   reductions, disabled CI, and Stryker threshold/scope changes.
@@ -121,6 +122,10 @@ On October 9, 2026:
 - Five condition-only review probes failed before the next fix, then passed
   for skip/run, nested calls, quoted parentheses and comments. A benign control
   still accepts unrelated body edits after a complete multiline condition.
+- Tampered `index.js` and `evaluation.js` each fail before import. Disabling
+  integrity verification in a temporary copy caused both tamper probes to
+  fail. Fixture template strings were rewritten without changing their cooked
+  text, detector assertions or deliberate weakening cases.
 - The pinned composite action's analysis shell step accepted a legitimate
   change (status 0), rejected a skipped-test change (status 1), and failed on
   empty analysis (status 2). Its final failure step exited 1 for a failed report.

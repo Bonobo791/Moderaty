@@ -1,18 +1,37 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, chmodSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, chmodSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { auditDiff, inspectStryker, auditRepository } from './audit.mjs';
+
+for (const file of ['index.js', 'evaluation.js']) {
+	test(("rejects a tampered engine before import: " + (file) + ""), () => {
+		const cwd = mkdtempSync(join(tmpdir(), 'moderaty-overlock-integrity-'));
+		try {
+			const module = process.env.OVERLOCK_MODULE ?? fileURLToPath(new URL('../../.github/overlock/node_modules/overlock/dist/index.js', import.meta.url));
+			for (const name of ['index.js', 'evaluation.js']) {
+				const content = readFileSync(join(dirname(module), name), 'utf8');
+				writeFileSync(join(cwd, name), content + (name === file ? '\n// tampered\n' : ''));
+			}
+			const result = spawnSync(process.execPath, [fileURLToPath(new URL('./audit.mjs', import.meta.url)), 'config'], {
+				encoding: 'utf8', env: { ...process.env, OVERLOCK_MODULE: join(cwd, 'index.js') }
+			});
+			assert.notEqual(result.status, 0);
+			assert.ok(result.stderr.includes('Overlock engine integrity failed: ' + file));
+			assert.equal(result.stdout, '');
+		} finally { rmSync(cwd, { recursive: true, force: true }); }
+	});
+}
 
 // Hand-labeled patches: removing any detector below must break its positive
 // control. Benign controls expose a gate that simply rejects every test edit.
 function patch(path, before, after) {
 	const old = before.split('\n');
 	const next = after.split('\n');
-	return `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1,${old.length} +1,${next.length} @@\n${old.map((line) => `-${line}`).join('\n')}\n${next.map((line) => `+${line}`).join('\n')}\n`;
+	return ("diff --git a/" + (path) + " b/" + (path) + "\n--- a/" + (path) + "\n+++ b/" + (path) + "\n@@ -1," + (old.length) + " +1," + (next.length) + " @@\n" + (old.map((line) => ("-" + (line) + "")).join('\n')) + "\n" + (next.map((line) => ("+" + (line) + "")).join('\n')) + "\n");
 }
 
 const exact = "it('rejects expired tokens', () => { expect(valid).toBe(false); });";
@@ -26,7 +45,7 @@ const weakening = [
 	['multiline conditional run', 'src/auth.test.ts', exact, exact.replace('it(', 'it\n .runIf(false)\n ('), 'TEST_SKIPPED_ADDED'],
 	['loose assertion', 'src/auth.test.ts', exact, exact.replace('toBe(false)', 'toBeDefined()'), 'ASSERTION_WEAKENED'],
 	['removed assertion', 'src/auth.test.ts', exact, "it('rejects expired tokens', () => { });", 'ASSERTION_REMOVED'],
-	['case deletion', 'src/auth.test.ts', `${exact}\nit('checks owner', () => { expect(owner).toBe('Andrew'); });`, exact, 'TEST_REMOVED'],
+	['case deletion', 'src/auth.test.ts', ("" + (exact) + "\nit('checks owner', () => { expect(owner).toBe('Andrew'); });"), exact, 'TEST_REMOVED'],
 	['object narrowing', 'src/auth.test.ts', "it('checks account', () => { expect(row).toEqual({ id: 3, owner: 'Andrew' }); });", "it('checks account', () => { expect(row.id).toBe(3); });", 'ASSERTION_NARROWED'],
 	['scope include', 'vite.config.ts', "include: ['src/**/*.test.ts', 'e2e/**/*.test.ts'],", "include: ['src/**/*.test.ts'],", 'SUITE_SCOPE_NARROWED'],
 	['scope exclude', 'vite.config.ts', "exclude: ['**/node_modules/**'],", "exclude: ['**/node_modules/**', 'src/auth/**'],", 'SUITE_SCOPE_NARROWED'],
@@ -39,7 +58,7 @@ const weakening = [
 ];
 
 for (const [name, path, before, after, rule] of weakening) {
-	test(`blocks ${name}`, () => {
+	test(("blocks " + (name) + ""), () => {
 		const report = auditDiff(patch(path, before, after));
 		assert.equal(report.ok, false);
 		assert.ok(report.findings.some((finding) => finding.rule === rule), rule);
@@ -47,25 +66,25 @@ for (const [name, path, before, after, rule] of weakening) {
 }
 
 test('blocks a deleted test file', () => {
-	const diff = `diff --git a/src/auth.test.ts b/src/auth.test.ts\ndeleted file mode 100644\n--- a/src/auth.test.ts\n+++ /dev/null\n@@ -1 +0,0 @@\n-${exact}\n`;
+	const diff = ("diff --git a/src/auth.test.ts b/src/auth.test.ts\ndeleted file mode 100644\n--- a/src/auth.test.ts\n+++ /dev/null\n@@ -1 +0,0 @@\n-" + (exact) + "\n");
 	assert.equal(auditDiff(diff).ok, false);
 	assert.ok(auditDiff(diff).findings.some((finding) => finding.rule === 'TEST_REMOVED'));
 });
 
 test('inline suppressions cannot clear a skip', () => {
-	const diff = patch('src/auth.test.ts', exact, `// overlock-ignore TEST_SKIPPED_ADDED -- temporary\n${exact.replace('it(', 'it.skip(')}`);
+	const diff = patch('src/auth.test.ts', exact, ("// overlock-ignore TEST_SKIPPED_ADDED -- temporary\n" + (exact.replace('it(', 'it.skip(')) + ""));
 	const report = auditDiff(diff);
 	assert.equal(report.ok, false);
 	assert.ok(report.findings.some((finding) => finding.rule === 'TEST_SKIPPED_ADDED'));
 });
 
 test('blocks a conditional skip attached to an unchanged declaration line', () => {
-	const diff = `diff --git a/src/auth.test.ts b/src/auth.test.ts\n--- a/src/auth.test.ts\n+++ b/src/auth.test.ts\n@@ -1,2 +1,3 @@\n it\n+ .skipIf(true)\n ('case', () => { expect(valid).toBe(false); });\n`;
+	const diff = "diff --git a/src/auth.test.ts b/src/auth.test.ts\n--- a/src/auth.test.ts\n+++ b/src/auth.test.ts\n@@ -1,2 +1,3 @@\n it\n+ .skipIf(true)\n ('case', () => { expect(valid).toBe(false); });\n";
 	assert.equal(auditDiff(diff).ok, false);
 });
 
 test('accepts an unrelated edit beside an unchanged conditional declaration', () => {
-	const diff = `diff --git a/src/auth.test.ts b/src/auth.test.ts\n--- a/src/auth.test.ts\n+++ b/src/auth.test.ts\n@@ -1,3 +1,4 @@\n it\n  .skipIf(true)\n  ('case', () => { expect(valid).toBe(false); });\n+ // Document the existing case.\n`;
+	const diff = "diff --git a/src/auth.test.ts b/src/auth.test.ts\n--- a/src/auth.test.ts\n+++ b/src/auth.test.ts\n@@ -1,3 +1,4 @@\n it\n  .skipIf(true)\n  ('case', () => { expect(valid).toBe(false); });\n+ // Document the existing case.\n";
 	assert.equal(auditDiff(diff).ok, true);
 });
 
@@ -75,29 +94,29 @@ for (const [method, before, after] of [
 	['skipIf', '\")\" === value && false', '\")\" === value && true'],
 	['skipIf', '/* ) */ false', '/* ) */ true']
 ]) {
-	test(`blocks condition-only ${method} edit: ${before}`, () => {
-		const diff = `diff --git a/src/auth.test.ts b/src/auth.test.ts\n--- a/src/auth.test.ts\n+++ b/src/auth.test.ts\n@@ -1,3 +1,3 @@\n it.${method}(\n- ${before}\n+ ${after}\n )('case', () => { expect(valid).toBe(false); });\n`;
+	test(("blocks condition-only " + (method) + " edit: " + (before) + ""), () => {
+		const diff = ("diff --git a/src/auth.test.ts b/src/auth.test.ts\n--- a/src/auth.test.ts\n+++ b/src/auth.test.ts\n@@ -1,3 +1,3 @@\n it." + (method) + "(\n- " + (before) + "\n+ " + (after) + "\n )('case', () => { expect(valid).toBe(false); });\n");
 		assert.equal(auditDiff(diff).ok, false);
 	});
 }
 
 test('accepts unrelated body edits after a multiline conditional argument', () => {
-	const diff = `diff --git a/src/auth.test.ts b/src/auth.test.ts\n--- a/src/auth.test.ts\n+++ b/src/auth.test.ts\n@@ -1,5 +1,6 @@\n it.skipIf(\n  predicate(\")\") /* ) */\n )('case', () => {\n+ // Describe the unchanged assertion.\n  expect(valid).toBe(false);\n });\n`;
+	const diff = "diff --git a/src/auth.test.ts b/src/auth.test.ts\n--- a/src/auth.test.ts\n+++ b/src/auth.test.ts\n@@ -1,5 +1,6 @@\n it.skipIf(\n  predicate(\")\") /* ) */\n )('case', () => {\n+ // Describe the unchanged assertion.\n  expect(valid).toBe(false);\n });\n";
 	assert.equal(auditDiff(diff).ok, true);
 });
 
 for (const [name, before, after] of [
 	['stronger assertion', "it('checks role', () => { expect(role).toBeDefined(); });", "it('checks role', () => { expect(role).toBe('admin'); });"],
-	['additional case', exact, `${exact}\nit('checks owner', () => { expect(owner).toBe('Andrew'); });`],
+	['additional case', exact, ("" + (exact) + "\nit('checks owner', () => { expect(owner).toBe('Andrew'); });")],
 	['formatting', exact, exact.replace('expect(valid)', 'expect( valid )')],
 	['exact null', "it('checks session', () => { expect(session).toBe(null); });", "it('checks session', () => { expect(session).toBeNull(); });"]
 ]) {
-	test(`accepts ${name}`, () => assert.equal(auditDiff(patch('src/auth.test.ts', before, after)).ok, true));
+	test(("accepts " + (name) + ""), () => assert.equal(auditDiff(patch('src/auth.test.ts', before, after)).ok, true));
 }
 
 test('accepts test relocation while reporting it for review', () => {
-	const diff = `diff --git a/src/auth.test.ts b/src/auth.test.ts\ndeleted file mode 100644\n--- a/src/auth.test.ts\n+++ /dev/null\n@@ -1 +0,0 @@\n-${exact}\n` +
-		`diff --git a/src/session.test.ts b/src/session.test.ts\nnew file mode 100644\n--- /dev/null\n+++ b/src/session.test.ts\n@@ -0,0 +1 @@\n+${exact}\n`;
+	const diff = ("diff --git a/src/auth.test.ts b/src/auth.test.ts\ndeleted file mode 100644\n--- a/src/auth.test.ts\n+++ /dev/null\n@@ -1 +0,0 @@\n-" + (exact) + "\n") +
+		("diff --git a/src/session.test.ts b/src/session.test.ts\nnew file mode 100644\n--- /dev/null\n+++ b/src/session.test.ts\n@@ -0,0 +1 @@\n+" + (exact) + "\n");
 	const report = auditDiff(diff);
 	assert.equal(report.ok, true);
 	assert.ok(report.findings.some((finding) => finding.rule === 'TEST_REMOVED' && finding.severity === 'medium'));
@@ -109,7 +128,7 @@ for (const [name, before, after, rule] of [
 	['removed mutation pattern', { mutate: ['src/**/*.ts', 'netlify/**/*.mjs'] }, { mutate: ['src/**/*.ts'] }, 'SUITE_SCOPE_NARROWED'],
 	['added mutation exclusion', { mutate: ['src/**/*.ts'] }, { mutate: ['src/**/*.ts', '!src/auth/**'] }, 'SUITE_SCOPE_NARROWED']
 ]) {
-	test(`blocks Stryker ${name}`, () => {
+	test(("blocks Stryker " + (name) + ""), () => {
 		const findings = inspectStryker(JSON.stringify(before), JSON.stringify(after));
 		assert.ok(findings.some((finding) => finding.rule === rule && finding.severity === 'high'));
 	});

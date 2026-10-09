@@ -1,0 +1,62 @@
+name: Merge evidence
+
+on:
+  pull_request:
+    branches: [dev, main]
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  execution:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: candidate
+    env:
+      MEG_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      MEG_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: axigatelabs/merge-evidence-gate
+          ref: d72ca6de67c38bab028015991203c7eeff4dce90
+          path: gate-tool
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.19.0'
+      - run: npm ci --ignore-scripts
+      - run: node --test scripts/merge-evidence/verify.checks.mjs
+      - name: Validate gate against real passing and misleading examples
+        run: node scripts/merge-evidence/examples.mjs "$GITHUB_WORKSPACE/gate-tool" "$RUNNER_TEMP/merge-evidence-examples"
+      # Sync SvelteKit before Vitest; existing checks.yml also checks/builds.
+      - run: npm run check
+      - run: node scripts/merge-evidence/prepare.mjs
+      - id: gate
+        uses: axigatelabs/merge-evidence-gate@d72ca6de67c38bab028015991203c7eeff4dce90
+        with:
+          agents-only: 'false'
+          evidence: run
+          test-command: npm test
+          policy-file: .github/merge-evidence-policy.yml
+          working-directory: candidate
+          fail-on: fail
+          base-comparison: never
+          comment: 'false'
+          sign: none
+          upload-receipt: 'true'
+      # Upstream abstention is not successful test execution. Run even when
+      # the action fails so the underlying process failure remains visible.
+      - name: Require fresh successful execution
+        if: ${{ always() }}
+        run: node scripts/merge-evidence/verify.mjs "$GITHUB_WORKSPACE/receipt.json" .merge-evidence/vitest-results.json "$GITHUB_WORKSPACE/merge-evidence-start.txt"

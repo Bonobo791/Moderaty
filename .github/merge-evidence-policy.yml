@@ -1,0 +1,10 @@
+version: moderaty-2026-10-09
+agents-only: false
+test-command: npm test
+severity:
+  C1: fail
+  C2: fail
+  C3: needs-human
+  C4: needs-human
+  C7: fail
+  C9: fail

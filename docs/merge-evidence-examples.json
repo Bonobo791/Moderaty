@@ -1,0 +1,164 @@
+{
+  "upstreamRevision": "d72ca6de67c38bab028015991203c7eeff4dce90",
+  "scenarios": [
+    {
+      "scenario": "human-passing",
+      "verdict": "PASS",
+      "accepted": true,
+      "reviewRequired": false,
+      "exitCode": 0,
+      "tests": {
+        "run": 2,
+        "passed": 2,
+        "failed": 0,
+        "skipped": 0,
+        "retried": 0
+      },
+      "checks": []
+    },
+    {
+      "scenario": "failing-assertion",
+      "verdict": "FAIL",
+      "accepted": false,
+      "reviewRequired": false,
+      "exitCode": 1,
+      "tests": {
+        "run": 2,
+        "passed": 0,
+        "failed": 2,
+        "skipped": 0,
+        "retried": 0
+      },
+      "checks": [
+        "C1",
+        "C2",
+        "C8"
+      ]
+    },
+    {
+      "scenario": "failure-without-claims",
+      "verdict": "PASS",
+      "accepted": false,
+      "reviewRequired": false,
+      "exitCode": 1,
+      "tests": {
+        "run": 2,
+        "passed": 0,
+        "failed": 2,
+        "skipped": 0,
+        "retried": 0
+      },
+      "checks": [
+        "C8"
+      ]
+    },
+    {
+      "scenario": "inflated-count",
+      "verdict": "FAIL",
+      "accepted": false,
+      "reviewRequired": false,
+      "exitCode": 0,
+      "tests": {
+        "run": 2,
+        "passed": 2,
+        "failed": 0,
+        "skipped": 0,
+        "retried": 0
+      },
+      "checks": [
+        "C2"
+      ]
+    },
+    {
+      "scenario": "tests-added-without-tests",
+      "verdict": "FAIL",
+      "accepted": false,
+      "reviewRequired": false,
+      "exitCode": 0,
+      "tests": {
+        "run": 2,
+        "passed": 2,
+        "failed": 0,
+        "skipped": 0,
+        "retried": 0
+      },
+      "checks": [
+        "C7",
+        "C8"
+      ]
+    },
+    {
+      "scenario": "skipped-test",
+      "verdict": "NEEDS_HUMAN",
+      "accepted": true,
+      "reviewRequired": true,
+      "exitCode": 0,
+      "tests": {
+        "run": 2,
+        "passed": 1,
+        "failed": 0,
+        "skipped": 1,
+        "retried": 0
+      },
+      "checks": [
+        "C3"
+      ]
+    },
+    {
+      "scenario": "deleted-test",
+      "verdict": "NEEDS_HUMAN",
+      "accepted": true,
+      "reviewRequired": true,
+      "exitCode": 0,
+      "tests": {
+        "run": 1,
+        "passed": 1,
+        "failed": 0,
+        "skipped": 0,
+        "retried": 0
+      },
+      "checks": [
+        "C3"
+      ]
+    },
+    {
+      "scenario": "weakened-ci",
+      "verdict": "NEEDS_HUMAN",
+      "accepted": true,
+      "reviewRequired": true,
+      "exitCode": 0,
+      "tests": {
+        "run": 2,
+        "passed": 2,
+        "failed": 0,
+        "skipped": 0,
+        "retried": 0
+      },
+      "checks": [
+        "C4",
+        "C8"
+      ]
+    },
+    {
+      "scenario": "legitimate-test-addition",
+      "verdict": "PASS",
+      "accepted": true,
+      "reviewRequired": false,
+      "exitCode": 0,
+      "tests": {
+        "run": 3,
+        "passed": 3,
+        "failed": 0,
+        "skipped": 0,
+        "retried": 0
+      },
+      "checks": []
+    },
+    {
+      "scenario": "stale-report-no-execution",
+      "verdict": "BLOCKED_BEFORE_RUN",
+      "accepted": false,
+      "reviewRequired": false
+    }
+  ]
+}

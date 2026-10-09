@@ -13,6 +13,10 @@ function isControl(path) {
 		CONTROL_PREFIXES.some((prefix) => filename.startsWith(prefix));
 }
 
+function isProduction(path) {
+	return /^(src|scripts)\//.test(path) || (!path.includes('/') && !/\.md$/i.test(path));
+}
+
 // This collects review evidence, not a quality verdict. Candidate files are data:
 // never imported, checked out, evaluated or passed to a shell.
 export function collectContext({ repo = process.cwd(), base, head, maxBytes = 2_000_000 }) {
@@ -49,7 +53,8 @@ export function collectContext({ repo = process.cwd(), base, head, maxBytes = 2_
 		return { ...evidence(file), production };
 	});
 	const controls = changed.filter((file) => isControl(file.path) || isControl(file.previousPath)).map(evidence);
-	const productionChanges = changed.filter((file) => /^(src|scripts)\//.test(file.path) && !TEST.test(file.path) && !isControl(file.path)).map(evidence);
+	const productionChanges = changed.filter((file) => (isProduction(file.path) || isProduction(file.previousPath)) &&
+		!TEST.test(file.path) && !TEST.test(file.previousPath) && !isControl(file.path) && !isControl(file.previousPath)).map(evidence);
 	const context = { base, mergeBase, head, changed, tests, controls, productionChanges };
 	if (Buffer.byteLength(JSON.stringify(context)) > maxBytes) {
 		throw new Error(`Review evidence exceeds ${maxBytes} bytes; split the PR (no evidence was truncated)`);

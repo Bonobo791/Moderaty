@@ -21,6 +21,7 @@ function matchesEntityTag(clientHeader: string | null | undefined, etag: string)
 }
 
 function cacheResponse(response: Response, event: Event): Response {
+	if (event.request?.method !== 'GET' && event.request?.method !== 'HEAD') return response;
 	const etag = response.headers.get('etag');
 	if (response.status !== 200 || etag === null || !matchesEntityTag(event.request?.headers.get('if-none-match'), etag)) return response;
 	const cacheHeaders = new Set(['etag', 'cache-control', 'content-location', 'date', 'expires', 'vary', 'set-cookie']);
@@ -86,6 +87,9 @@ export const handle: Handle = async (input) => {
 		}
 		const status = isHttpError(error_) ? error_.status : 500;
 		const body = isHttpError(error_) ? error_.body : await handleError({ error: error_, event, status, message: 'Internal Error' }) ?? { message: 'Internal Error' };
+		if (event.request?.method === 'POST' && event.request.headers.get('x-sveltekit-action') === 'true') {
+			return correlate(json({ type: 'error', error: body }, { status }), event);
+		}
 		if (wantsJson(event)) {
 			return correlate(json(body, { status }), event);
 		}

@@ -741,3 +741,33 @@ test.each(['migration', 'session'])('real %s outages retain safe diagnostics whi
 	});
 	expect(JSON.stringify(log.mock.calls)).not.toContain('synthetic-private-value');
 });
+
+
+test.each(['POST', 'PUT', 'PATCH', 'DELETE'])('matching ETags preserve successful %s outcomes', async (method) => {
+	mocks.getSessionUser.mockResolvedValue(null);
+	const event = { ...makeEvent(), request: new Request('http://localhost/', { method, headers: { 'if-none-match': '*' } }) };
+	const resolve = vi.fn(async () => new Response('mutation completed', { headers: { etag: '"same-page"' } }));
+	const response = await handle({ event, resolve } as never);
+	expect(resolve).toHaveBeenCalledOnce();
+	expect(response.status).toBe(200);
+	expect(await response.text()).toBe('mutation completed');
+	expect(response.headers.get('x-request-id')).toMatch(/^[0-9a-f-]{36}$/);
+});
+
+test.each([503, 500])('enhanced form hook failures return usable ActionResults (%s)', async (status) => {
+	let failure: unknown = new Error('synthetic-private-value');
+	if (status === 503) {
+		try { error(503, 'Deployment requires migrations'); } catch (e) { failure = e; }
+	}
+	mocks.assertMigrationsCurrent.mockRejectedValue(failure);
+	// Unexpected migration outages intentionally degrade; throw at resolve for the 500 case.
+	if (status === 500) mocks.assertMigrationsCurrent.mockResolvedValue(undefined);
+	mocks.getSessionUser.mockResolvedValue(null);
+	const event = { ...makeEvent(), request: new Request('http://localhost/login', { method: 'POST', headers: { accept: 'application/json', 'x-sveltekit-action': 'true' } }) };
+	const response = await handle({ event, resolve: async () => { throw failure; } } as never);
+	const result = await response.json();
+	expect(response.status).toBe(status);
+	expect(result).toEqual({ type: 'error', error: { message: status === 503 ? 'Deployment requires migrations' : 'Internal Error' } });
+	expect(response.headers.get('x-request-id')).toMatch(/^[0-9a-f-]{36}$/);
+	expect(JSON.stringify(result)).not.toContain('synthetic-private-value');
+});

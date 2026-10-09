@@ -163,3 +163,13 @@ test('workflow collector runs against an older base without executing the candid
 	expect(context.tests[0].after).toBe('after\n');
 	expect(context.productionChanges[0].after).toContain('UNTRUSTED COLLECTOR EXECUTED');
 });
+
+
+test('includes root deployment files and files moved out of production directories', () => {
+	const before = { 'svelte.config.js': 'adapter: old', 'Dockerfile': 'FROM old', '.env.example': 'PUBLIC_FEATURE=false', 'src/config.js': 'export const enabled = false', 'README.md': 'before' };
+	const after = { 'svelte.config.js': 'adapter: new', 'Dockerfile': 'FROM new', '.env.example': 'PUBLIC_FEATURE=true', 'src/config.js': null, 'archive/config.js': 'export const enabled = false', 'README.md': 'after' };
+	const result = collectContext(fixture(before, after));
+	expect(result.productionChanges.map((file) => file.path)).toEqual(expect.arrayContaining(['svelte.config.js', 'Dockerfile', '.env.example', 'archive/config.js']));
+	expect(result.productionChanges.find((file) => file.path === 'svelte.config.js')).toMatchObject({ before: 'adapter: old', after: 'adapter: new' });
+	expect(result.productionChanges.some((file) => file.path === 'README.md')).toBe(false);
+});

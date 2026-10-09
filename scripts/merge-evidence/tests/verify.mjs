@@ -160,7 +160,7 @@ test('preparation removes stale artifacts and refuses a narrowed npm test script
 	} finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-for (const scenario of ['renamed policy', 'large ordinary patch']) test(`checkout handles ${scenario}`, () => {
+for (const scenario of ['renamed policy', 'large ordinary patch', 'missing base diagnostic']) test(`checkout handles ${scenario}`, () => {
 	const dir = mkdtempSync(resolve(tmpdir(), 'meg-checkout-'));
 	const git = (...args) => execFileSync('/usr/bin/git', args, { cwd: dir, encoding: 'utf8' }).trim();
 	try {
@@ -168,11 +168,14 @@ for (const scenario of ['renamed policy', 'large ordinary patch']) test(`checkou
 		writeFileSync(resolve(dir, '.merge-evidence.yml'), 'severity: {}'); git('add', '.'); git('commit', '-qm', 'base');
 		const baseSha = git('rev-parse', 'HEAD');
 		if (scenario === 'renamed policy') git('mv', '.merge-evidence.yml', 'ordinary.yml');
-		else writeFileSync(resolve(dir, 'ordinary.txt'), 'ordinary line\n'.repeat(5_000_000));
+		else writeFileSync(resolve(dir, 'ordinary.txt'), scenario === 'large ordinary patch' ? 'ordinary line\n'.repeat(5_000_000) : 'ordinary line\n');
 		git('add', '.'); git('commit', '-qm', 'head');
 		const revisions = { baseSha, headSha: git('rev-parse', 'HEAD') };
 		if (scenario === 'renamed policy') assert.throws(() => verifyCheckout(revisions, dir), /owner review.*\.merge-evidence.yml/);
-		else assert.doesNotThrow(() => verifyCheckout(revisions, dir));
+		else if (scenario === 'missing base diagnostic') {
+			assert.throws(() => verifyCheckout({ ...revisions, baseSha: 'f'.repeat(40) }, dir),
+				/PR diff could not be independently verified: fatal: Not a valid commit name f{40}/);
+		} else assert.doesNotThrow(() => verifyCheckout(revisions, dir));
 	} finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

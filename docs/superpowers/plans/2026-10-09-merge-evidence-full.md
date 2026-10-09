@@ -77,3 +77,13 @@ Files: `.github/merge-evidence-policy.yml`, `.github/workflows/merge-evidence.ym
 
 - Fresh application validation after review fixes: check zero errors/warnings,
   Netlify build passed, 4,021 tests across 206 files passed.
+
+## Git diagnostic review follow-up
+
+- Gitar #4231558996: missing-base diagnostics were discarded by the Git wrapper.
+  Added a real Git regression, observed its failure, and preserved stderr in
+  the rejection message with the process error as a fallback when stderr is empty.
+- All 29 Node checks pass, including the rename and 70 MB patch regressions.
+  The real-action unavailable-base example now requires the specific Git diagnostic.
+- Fresh validation: 24 real-action scenarios pass expected outcomes, check reports
+  zero diagnostics, Netlify build passes, and all 4,021 application tests pass.

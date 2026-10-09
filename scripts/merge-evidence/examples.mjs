@@ -107,7 +107,7 @@ for (const scenario of scenarios) {
 	assert.equal(accepted, scenario.accept, `${scenario.name}: unexpected acceptance; see ${dir}/action.log`);
 	if (scenario.runtimeSkip) { assert.equal(receipt.observed.totals.skipped, 1); assert.match(verified.stderr, /owner review.*skipped/); }
 	if (scenario.localReview) assert.match(verified.stderr, /owner review required for gate changes/);
-	if (scenario.missingBase) assert.match(verified.stderr, /diff could not be independently verified/);
+	if (scenario.missingBase) assert.match(verified.stderr, /diff could not be independently verified: fatal: Not a valid commit name f{40}/);
 	if (scenario.check) assert(receipt.discrepancies.some((d) => d.check === scenario.check), `${scenario.name}: expected ${scenario.check}`);
 	if (scenario.review) assert.equal(receipt.verdict, scenario.verdict ?? 'NEEDS_HUMAN');
 	if (scenario.baseline) {

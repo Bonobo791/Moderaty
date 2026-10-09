@@ -7,7 +7,10 @@ export function verifyCheckout({ headSha, baseSha }, cwd = process.cwd()) {
 	const git = (args, discardOutput = false) => {
 		try { return execFileSync('/usr/bin/git', args, { cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
 			stdio: ['ignore', discardOutput ? 'ignore' : 'pipe', 'pipe'] }); }
-		catch { throw new Error('Merge evidence rejected: PR diff could not be independently verified'); }
+		catch (error) {
+			const diagnostic = String(error.stderr || error.message).trim();
+			throw new Error('Merge evidence rejected: PR diff could not be independently verified: ' + diagnostic);
+		}
 	};
 	if (git(['rev-parse', 'HEAD']).trim() !== headSha) {
 		throw new Error('Merge evidence rejected: checkout revision differs from PR head');

@@ -39,6 +39,7 @@ checks the actual checkout and independently requires a working Git diff.
 Changes to the gate's own scripts and policies also block for owner review,
 including files renamed out of protected paths. Patch validation discards stdout
 while preserving Git's exit status, so large text diffs do not overflow a buffer.
+Git failures retain their stderr diagnostic in the rejection message.
 Concurrent PR-body edits cancel superseded executions. Comment posting and signing are disabled. Permissions are only
 `contents: read` and `pull-requests: read`; checkouts do not retain credentials.
 No secrets, write-enabled token, `pull_request_target`, self-hosted runner,
@@ -62,7 +63,7 @@ disposable git repositories. It uses no GitHub API token, artifact upload,
 comment posting or remote moderation. It checks the upstream revision and
 bundle contents before execution. The same harness runs in CI.
 
-Local results: 28 verifier/preparation checks passed; all 24 full-feature
+Local results: 29 verifier/preparation checks passed; all 24 full-feature
 real-action scenarios passed their expected outcomes; results are recorded below and in the JSON evidence. Honest human work
 and a legitimate added test passed. Failed assertions, failures without a
 test claim, inflated counts and a false checked tests-added claim were

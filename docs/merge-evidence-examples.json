@@ -423,7 +423,7 @@
       "accepted": false,
       "reviewRequired": false,
       "verifierExit": 1,
-      "rejectionReason": "Merge evidence rejected: PR diff could not be independently verified",
+      "rejectionReason": "Merge evidence rejected: PR diff could not be independently verified: fatal: Not a valid commit name ffffffffffffffffffffffffffffffffffffffff",
       "actionExit": 0,
       "exitCode": 0,
       "tests": {

@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { afterEach, expect, test } from 'vitest';
@@ -127,18 +127,17 @@ test('Codex workflow restricts repository access and omits Copilot credentials',
 	expect(workflow).toContain('id: codex');
 	expect(workflow).toContain('bash: false');
 	expect(workflow).not.toContain('copilot-requests: write');
-	const compiled = readFileSync(new URL('../.github/workflows/test-quality-sentinel.lock.yml', import.meta.url), 'utf8');
-	expect(compiled).not.toContain('secrets.COPILOT_GITHUB_TOKEN');
-	expect(compiled).toContain('secrets.CODEX_API_KEY || secrets.OPENAI_API_KEY');
-	expect(compiled).toContain('features.shell_tool=false');
-	expect(compiled).toContain('github.event.pull_request.head.repo.id == github.event.repository.id');
+	expect(workflow).not.toContain('secrets.COPILOT_GITHUB_TOKEN');
+	expect(workflow).toContain('strict: true');
+	expect(workflow).toContain('edit: false');
+	expect(workflow).toContain('contents: read\n  pull-requests: read');
 });
 
 test('the introduction workflow runs its pinned collector even when the base has no collector', () => {
 	const workflow = readFileSync(new URL('../.github/workflows/test-quality-sentinel.md', import.meta.url), 'utf8');
 	expect(workflow).toMatch(/  pull_request_target:\n/);
 	expect(workflow).toContain('model: gpt-5.4');
-	expect(readFileSync(new URL('../.github/workflows/test-quality-sentinel.lock.yml', import.meta.url), 'utf8')).not.toContain('github.event.pull_request.stack.position');
+	expect(workflow).not.toContain('github.event.pull_request.stack.position');
 	const collectorCheckout = workflow.match(/- name: Check out pinned evidence collector[\s\S]*?(?=  - name:)/)?.[0];
 	expect(collectorCheckout).toMatch(/ref: [a-f0-9]{40}/);
 	expect(collectorCheckout).toContain('path: .sentinel-collector');
@@ -245,4 +244,9 @@ test.each([
 	const attached = attachEvidence(context, 'a'.repeat(40));
 	expect(attached.run).toThrow(error);
 	expect(attached.prompt()).toBe('Trusted review instructions');
+});
+
+
+test("Sentinel is source-only until the user re-enables its compiled workflow", () => {
+	expect(existsSync(new URL("../.github/workflows/test-quality-sentinel.lock.yml", import.meta.url))).toBe(false);
 });

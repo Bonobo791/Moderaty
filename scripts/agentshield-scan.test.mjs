@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, test, vi } from 'vitest';
@@ -55,4 +55,9 @@ test('Codex-disabled vendor hooks omit only missing-hook policy suggestions', ()
 	expect(exclusionReason({ ...warning, id: 'hooks-exfiltration' }, root)).toBeNull();
 	writeFileSync(join(root, '.agents/superpowers/.codex-plugin/plugin.json'), '{"hooks":{"PreToolUse":[]}}');
 	expect(exclusionReason(warning, root)).toBeNull();
+});
+
+test('the approved AgentShield CI action is pinned to the v1.6.0 commit', () => {
+	const workflow = readFileSync(new URL('../.github/workflows/checks.yml', import.meta.url), 'utf8');
+	expect(workflow).toContain('uses: affaan-m/agentshield@b0891303bdcd6037376a94263d45cfd2ff3dfb98');
 });

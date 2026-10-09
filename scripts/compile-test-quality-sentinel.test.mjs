@@ -4,7 +4,7 @@ import { expect, test } from 'vitest';
 import { normalizeGatewayMask, normalizeCodexWorkflow } from './compile-test-quality-sentinel.mjs';
 
 test('compiled masking preserves literal values and cannot execute shell content', () => {
-	const workflow = readFileSync(new URL('../.github/workflows/test-quality-sentinel.lock.yml', import.meta.url), 'utf8');
+	const workflow = readFileSync(new URL('./fixtures/test-quality-sentinel-compiler.yml', import.meta.url), 'utf8');
 	const original = workflow.replace(/^([ \t]*)printf.*MCP_GATEWAY_AGENT_ID.*$/m,
 		(_, indent) => indent + 'echo "::add-mask::$' + '{MCP_GATEWAY_AGENT_ID}"');
 	const normalized = normalizeGatewayMask(original);
@@ -32,7 +32,7 @@ test.each(['../../etc/passwd', '/bin/sh', '$(exit 42)'])('compiler rejects calle
 
 
 test('Codex normalization omits unused Copilot credentials while preserving OpenAI and GitHub checks', () => {
-	const workflow = readFileSync(new URL('../.github/workflows/test-quality-sentinel.lock.yml', import.meta.url), 'utf8');
+	const workflow = readFileSync(new URL('./fixtures/test-quality-sentinel-compiler.yml', import.meta.url), 'utf8');
 	let generated = workflow.replace('          GH_AW_GITHUB_TOKEN: $' + '{{ secrets.GH_AW_GITHUB_TOKEN }}',
 		'          COPILOT_GITHUB_TOKEN: $' + '{{ secrets.COPILOT_GITHUB_TOKEN }}\n          GH_AW_GITHUB_TOKEN: $' + '{{ secrets.GH_AW_GITHUB_TOKEN }}');
 	generated = generated.replace(/^# gh-aw-manifest: (.+)$/m, (_, json) => {
@@ -52,7 +52,7 @@ test('Codex normalization omits unused Copilot credentials while preserving Open
 });
 
 test('normalization rejects a non-Codex engine or unexpected Copilot credential usage', () => {
-	const workflow = readFileSync(new URL('../.github/workflows/test-quality-sentinel.lock.yml', import.meta.url), 'utf8');
+	const workflow = readFileSync(new URL('./fixtures/test-quality-sentinel-compiler.yml', import.meta.url), 'utf8');
 	expect(() => normalizeCodexWorkflow(workflow.replace('"agent_id":"codex"', '"agent_id":"copilot"'))).toThrow(/compiled Codex/);
 	expect(() => normalizeCodexWorkflow(workflow + '\nUnexpected: $' + '{{ secrets.COPILOT_GITHUB_TOKEN }}')).toThrow(/Unexpected Copilot credential/);
 });

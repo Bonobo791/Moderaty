@@ -1,8 +1,11 @@
 # Test Quality Sentinel
 
-The standard GitHub Actions entry point is
-`.github/workflows/test-quality-sentinel.lock.yml`. Its editable source is
-`test-quality-sentinel.md`. It runs on opened, updated, reopened and ready PRs
+The compiled GitHub Actions entry point was removed at the maintainer's request.
+Test Quality Sentinel is disabled in this branch; `test-quality-sentinel.md`
+remains as source. The compiler and its normalization tests remain available,
+using a minimal compiler fixture. Recompiling recreates the executable workflow
+and requires maintainer approval before re-enabling it. The description below
+documents its behavior when enabled. It runs on opened, updated, reopened and ready PRs
 targeting `dev` or `main`, including drafts, human-authored and stacked PRs.
 The trusted `pull_request_target` trigger runs the workflow from the base branch;
 PR edits cannot replace the workflow or collector in that run. Fork PRs

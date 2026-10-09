@@ -501,6 +501,32 @@ async function applyModerationBatch(
 	return completeActions(applicable.filter((action) => finished.has(action.commentId)), expected);
 }
 
+async function guardPendingAction(
+	action: OutstandingAction,
+	channelId: string,
+	authors: Map<string, string>,
+	protection: ProtectedIdentities,
+	transaction: Pick<typeof db, 'select' | 'update' | 'insert'>
+): Promise<OutstandingAction | null> {
+	if (action.state !== 'pending' || action.action === 'hold') return action;
+	const author = authors.get(action.commentId);
+	const handle = author ? protection.byChannelId.get(author) : undefined;
+	const uncertain = protection.unresolved || !author;
+	if (!handle && !uncertain) return action;
+	const current = await transaction.select().from(comments).where(and(eq(comments.id, action.commentId), eq(comments.channelId, channelId))).all();
+	if (!current[0] || hasHumanClaim(current[0]) || current[0].decidedBy === 'human') return null;
+	const reason = handle ? 'protected handle' : 'protected identity unresolved';
+	const changed = await transaction.update(moderationActions)
+		.set(handle ? {state:'superseded'} : {action:'hold', reason, authorHandle:null})
+		.where(and(eq(moderationActions.commentId, action.commentId), eq(moderationActions.channelId, channelId), eq(moderationActions.state,'pending')))
+		.returning({id:moderationActions.commentId});
+	if (!changed.length) return null;
+	await transaction.update(comments).set({status:handle ? 'approved':'pending', decidedBy:handle ? 'allowlist':'none', matchedRuleId:null, aiScore:null})
+		.where(and(eq(comments.id,action.commentId), eq(comments.channelId,channelId)));
+	await transaction.insert(auditLog).values({channelId, commentId:action.commentId, action:handle ? 'approve':'queue', reason, actor:'system', authorHandle:handle ?? null, createdAt:new Date().toISOString()});
+	return handle ? null : {...action, action:'hold', reason, authorHandle:null};
+}
+
 /** Revalidate pending destructive intents against current protection before claiming them.
  * Provider IDs are fetched outside the transaction and discarded after this sweep. */
 async function guardPendingProtection(actions: OutstandingAction[], accessToken: string, deadline: number | undefined, expected?: ChannelIdentity, previous?: ProtectedIdentities): Promise<OutstandingAction[]> {
@@ -515,23 +541,8 @@ async function guardPendingProtection(actions: OutstandingAction[], accessToken:
 		if (!protection.configured) return actions;
 		const result: OutstandingAction[] = [];
 		for (const action of actions) {
-			if (action.state !== 'pending' || action.action === 'hold') {result.push(action); continue;}
-			const author = authors.get(action.commentId);
-			const handle = author ? protection.byChannelId.get(author) : undefined;
-			const uncertain = protection.unresolved || (protection.configured && !author);
-			if (!handle && !uncertain) {result.push(action); continue;}
-			const current = await transaction.select().from(comments).where(and(eq(comments.id, action.commentId), eq(comments.channelId, channelId))).all();
-			if (!current[0] || hasHumanClaim(current[0]) || current[0].decidedBy === 'human') continue;
-			const reason = handle ? 'protected handle' : 'protected identity unresolved';
-			const changed = await transaction.update(moderationActions)
-				.set(handle ? {state:'superseded'} : {action:'hold', reason, authorHandle:null})
-				.where(and(eq(moderationActions.commentId, action.commentId), eq(moderationActions.channelId, channelId), eq(moderationActions.state,'pending')))
-				.returning({id:moderationActions.commentId});
-			if (!changed.length) continue;
-			await transaction.update(comments).set({status:handle ? 'approved':'pending', decidedBy:handle ? 'allowlist':'none', matchedRuleId:null, aiScore:null})
-				.where(and(eq(comments.id,action.commentId), eq(comments.channelId,channelId)));
-			await transaction.insert(auditLog).values({channelId, commentId:action.commentId, action:handle ? 'approve':'queue', reason, actor:'system', authorHandle:handle ?? null, createdAt:new Date().toISOString()});
-			if (!handle) result.push({...action, action:'hold', reason, authorHandle:null});
+			const guarded = await guardPendingAction(action, channelId, authors, protection, transaction);
+			if (guarded) result.push(guarded);
 		}
 		return result;
 	});

@@ -15,6 +15,7 @@ concurrency:
 
 jobs:
   execution:
+    name: Merge evidence verification
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     defaults:

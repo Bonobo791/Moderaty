@@ -5,7 +5,7 @@ in the separate Merge Evidence Gate session. Branch:
 `task/merge-evidence-gate-2026-10-09`, based on main
 `496565f0187fed87238d31e6aae0f06955d2036c`.
 
-The new `Merge evidence / execution` job runs for human and agent PRs targeting
+The uniquely named `Merge evidence verification` check runs for human and agent PRs targeting
 `dev` or `main`, including PR-body edits. It executes `npm test` with the
 upstream JSON reporter on Node 24.19.0. Existing `checks.yml`, application
 tests, mutation/property tests and dependency manifests are unchanged.
@@ -143,7 +143,13 @@ how to adopt the gate under the repository's existing controls.
 
 These changes are **not applied**. They require a separate owner decision:
 
-1. Require the exact `Merge evidence / execution` check on `dev` and `main`,
+The current active `Main` ruleset (19972799) applies only to the default
+branch and contains deletion and non-fast-forward restrictions. Preserve it.
+The read-only API does not show PR/review/status-check requirements in that
+ruleset. Any separate legacy protections must also be preserved. Confirm the
+new uniquely named check context after its first hosted run before requiring it.
+
+1. Require the exact `Merge evidence verification` check on `dev` and `main`,
    alongside existing checks and the separate Overlock check, without removing
    any current requirement. Require approval of the latest revision and protect
    gate paths using code-owner review. Proposed owner entries are:
@@ -154,6 +160,10 @@ These changes are **not applied**. They require a separate owner decision:
    /.merge-evidence.yml @Bonobo791
    /scripts/merge-evidence/ @Bonobo791
    ```
+
+   Owner-authored PRs cannot be approved by that same GitHub account. Review
+   enforcement therefore needs another eligible reviewer or a separately
+   approved adoption policy; no bypass actor is proposed here.
 
 2. For signing, use a separate trusted receipt publisher on the default branch.
    Its permissions would be `actions: read`, `contents: read`, `id-token: write`

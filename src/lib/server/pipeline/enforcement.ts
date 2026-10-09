@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
 import { maybeTriggerAutoTopUp } from '$lib/server/billing/autotopup';
-import { loadProtectedIdentities, type ProtectedIdentities } from '$lib/server/allowlist';
+import { loadProtectedIdentities, loadProtectedAuthors, type ProtectedIdentities } from '$lib/server/allowlist';
 import { hasHumanClaim } from './human-claims';
 import { db } from '$lib/server/db';
 import { auditLog, channels, comments, moderationActions } from '$lib/server/db/schema';
@@ -10,6 +10,7 @@ import {
 	CommentNotFoundError,
 	deleteComment,
 	fetchCommentAuthorIds,
+	fetchAuthorHandles,
 	resolveHandleChannelId,
 	setModerationStatus,
 	YOUTUBE_ID_BATCH_SIZE
@@ -28,6 +29,7 @@ export class ChannelDeactivatedError extends Error {}
  */
 export type ChannelIdentity = Pick<typeof channels.$inferSelect, 'userId' | 'refreshTokenEnc'> & { leaseExpiresAt?: string | null };
 type ChannelGuardHandle = Pick<typeof db, 'update'>;
+type ProtectionTransaction = Pick<typeof db, 'select' | 'update' | 'insert'>;
 type OutstandingState = 'pending' | 'dispatched' | 'cancelling';
 
 /**
@@ -501,24 +503,13 @@ async function applyModerationBatch(
 	return completeActions(applicable.filter((action) => finished.has(action.commentId)), expected);
 }
 
-async function guardPendingAction(
-	action: OutstandingAction,
-	channelId: string,
-	authors: Map<string, string>,
-	protection: ProtectedIdentities,
-	transaction: Pick<typeof db, 'select' | 'update' | 'insert'>
+async function applyProtectionDecision(
+	action: OutstandingAction, channelId: string, handle: string | undefined, transaction: ProtectionTransaction
 ): Promise<OutstandingAction | null> {
-	if (action.state !== 'pending' || action.action === 'hold') return action;
-	const author = authors.get(action.commentId);
-	const handle = author ? protection.byChannelId.get(author) : undefined;
-	const uncertain = protection.unresolved || !author;
-	if (!handle && !uncertain) return action;
-	const current = await transaction.select().from(comments).where(and(eq(comments.id, action.commentId), eq(comments.channelId, channelId))).all();
-	if (!current[0] || hasHumanClaim(current[0]) || current[0].decidedBy === 'human') return null;
 	const reason = handle ? 'protected handle' : 'protected identity unresolved';
 	const changed = await transaction.update(moderationActions)
-		.set(handle ? {state:'superseded'} : {action:'hold', reason, authorHandle:null})
-		.where(and(eq(moderationActions.commentId, action.commentId), eq(moderationActions.channelId, channelId), eq(moderationActions.state,'pending')))
+		.set(handle ? {state:action.state === 'dispatched' ? 'cancelling' : 'superseded'} : {action:'hold', reason, authorHandle:null})
+		.where(and(eq(moderationActions.commentId, action.commentId), eq(moderationActions.channelId, channelId), eq(moderationActions.state,action.state)))
 		.returning({id:moderationActions.commentId});
 	if (!changed.length) return null;
 	await transaction.update(comments).set({status:handle ? 'approved':'pending', decidedBy:handle ? 'allowlist':'none', matchedRuleId:null, aiScore:null})
@@ -527,14 +518,37 @@ async function guardPendingAction(
 	return handle ? null : {...action, action:'hold', reason, authorHandle:null};
 }
 
+async function guardPendingAction(
+	action: OutstandingAction,
+	channelId: string,
+	authors: Map<string, string>,
+	protection: ProtectedIdentities,
+	transaction: ProtectionTransaction
+): Promise<OutstandingAction | null> {
+	if (action.state === 'cancelling' || action.action === 'hold') return action;
+	const author = authors.get(action.commentId);
+	const handle = author ? protection.byChannelId.get(author) : undefined;
+	const uncertain = protection.unresolved || !author;
+	if (!handle && !uncertain) return action;
+	if (!handle && uncertain && action.state === 'dispatched') throw new Error('Protected identity is unavailable for a dispatched action; destructive retry deferred');
+	const current = await transaction.select().from(comments).where(and(eq(comments.id, action.commentId), eq(comments.channelId, channelId))).all();
+	// Human dispatch owns terminalization; retaining its row preserves reconciliation evidence.
+	if (!current[0] || hasHumanClaim(current[0]) || current[0].decidedBy === 'human') return null;
+	return applyProtectionDecision(action, channelId, handle, transaction);
+}
+
 /** Revalidate pending destructive intents against current protection before claiming them.
  * Provider IDs are fetched outside the transaction and discarded after this sweep. */
 async function guardPendingProtection(actions: OutstandingAction[], accessToken: string, deadline: number | undefined, expected?: ChannelIdentity, previous?: ProtectedIdentities): Promise<OutstandingAction[]> {
-	const pending = actions.filter(action => action.state === 'pending' && action.action !== 'hold');
+	const pending = actions.filter(action => action.state !== 'cancelling' && action.action !== 'hold');
 	if (!pending.length) return actions;
 	const channelId = pending[0].channelId;
-	const snapshot = await loadProtectedIdentities(channelId, db, handle => resolveHandleChannelId(handle, accessToken, deadline), previous);
-	const authors = snapshot.configured ? await fetchCommentAuthorIds(pending.map(action => action.commentId), accessToken, deadline) : new Map<string,string>();
+	const configured = await loadProtectedIdentities(channelId);
+	const authors = configured.configured ? await fetchCommentAuthorIds(pending.map(action => action.commentId), accessToken, deadline) : new Map<string,string>();
+	const authorIds = [...authors.values()];
+	const covered = previous?.observedAuthorIds && authorIds.every(id => previous.observedAuthorIds?.has(id));
+	const handles = configured.configured && !covered ? await fetchAuthorHandles(authorIds, accessToken, deadline) : new Map<string, string>();
+	const snapshot = covered ? previous : await loadProtectedAuthors(channelId, db, authorIds, handles, handle => resolveHandleChannelId(handle, accessToken, deadline), previous);
 	return db.transaction(async transaction => {
 		await assertChannelActive(channelId, transaction, expected);
 		const protection = await loadProtectedIdentities(channelId, transaction, undefined, snapshot);
@@ -609,7 +623,16 @@ async function processOutstandingActions(channelId: string, accessToken: string,
 	const releasable = cancelling.filter((action) => convergedCancels.has(action.commentId));
 	await transitionActions(releasable, { state: 'superseded' }, expected, ['cancelling']);
 	// Stryker disable next-line MethodExpression, ConditionalExpression: equivalent — claimPendingActions' SQL still guards eq(state, 'pending'), so handing it dispatched rows too claims nothing extra
-	const guarded = await guardPendingProtection(actions.filter(action => !restoring.has(action.commentId)), accessToken, deadline, expected, protection);
+	let guarded: OutstandingAction[];
+	let protectionFailure: unknown = null;
+	try {
+		guarded = await guardPendingProtection(actions.filter(action => !restoring.has(action.commentId)), accessToken, deadline, expected, protection);
+	} catch (error) {
+		if (error instanceof DeadlineExceededError || error instanceof ChannelDeactivatedError) throw error;
+		console.warn('protection revalidation failed; only non-destructive holds will be attempted');
+		protectionFailure = error;
+		guarded = actions.filter(action => action.action === 'hold' && !restoring.has(action.commentId));
+	}
 	const claimed = await claimPendingActions(guarded.filter((action) => action.state === 'pending' && !restoring.has(action.commentId)), expected);
 	// Stryker disable next-line ArrayDeclaration: equivalent — applyYoutubeActions selects entries by their action field, so a foreign element in the array is never selected
 	const ready: OutstandingAction[] = [];
@@ -627,7 +650,9 @@ async function processOutstandingActions(channelId: string, accessToken: string,
 			if (claimed.has(action.commentId)) ready.push(action);
 		}
 	}
-	return applyYoutubeActions(ready, accessToken, deadline, expected);
+	const acted = await applyYoutubeActions(ready, accessToken, deadline, expected);
+	if (protectionFailure) throw protectionFailure;
+	return acted;
 }
 
 /**

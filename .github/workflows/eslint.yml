@@ -1,0 +1,43 @@
+name: ESLint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '19 20 * * 1'
+
+jobs:
+  eslint:
+    name: Run eslint scanning
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.19.0'
+      - name: Install isolated ESLint tools
+        run: |
+          npm install --prefix "$RUNNER_TEMP/moderaty-eslint" --ignore-scripts --no-audit --no-fund eslint@9.39.5 @typescript-eslint/parser@8.71.1 @microsoft/eslint-formatter-sarif@3.1.0
+          cp scripts/eslint.config.mjs "$RUNNER_TEMP/moderaty-eslint/eslint.config.mjs"
+      - name: Run ESLint
+        env:
+          SARIF_ESLINT_IGNORE_SUPPRESSED: 'true'
+        run: >-
+          node "$RUNNER_TEMP/moderaty-eslint/node_modules/eslint/bin/eslint.js" .
+          --config "$RUNNER_TEMP/moderaty-eslint/eslint.config.mjs"
+          --format "$RUNNER_TEMP/moderaty-eslint/node_modules/@microsoft/eslint-formatter-sarif/sarif.js"
+          --output-file eslint-results.sarif
+      - name: Upload analysis results
+        if: always() && hashFiles('eslint-results.sarif') != ''
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d
+        with:
+          sarif_file: eslint-results.sarif
+          wait-for-processing: true

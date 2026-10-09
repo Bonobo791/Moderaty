@@ -14,7 +14,7 @@ function isControl(path) {
 }
 
 function isProduction(path) {
-	return /^(src|scripts|netlify)\//.test(path) || (!path.includes('/') && !/\.md$/i.test(path));
+	return /^(src|scripts|netlify|drizzle)\//.test(path) || (!path.includes('/') && !/\.md$/i.test(path));
 }
 
 // This collects review evidence, not a quality verdict. Candidate files are data:

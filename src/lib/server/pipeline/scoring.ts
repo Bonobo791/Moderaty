@@ -1,5 +1,5 @@
 import { and, eq, inArray } from 'drizzle-orm';
-import { loadProtectedIdentities } from '$lib/server/allowlist';
+import { loadProtectedIdentities, loadProtectedAuthors } from '$lib/server/allowlist';
 import { getCredits, orgIsMetered } from '$lib/server/billing/ledger';
 import { db } from '$lib/server/db';
 import { comments, rules } from '$lib/server/db/schema';
@@ -150,10 +150,9 @@ const freshComments = page.comments.filter((comment) => {
 });
 // Idle/already-staged pages need configuration only. Pending destructive
 // actions independently resolve protection in enforcement when necessary.
-const allowlist = await loadProtectedIdentities(channelId, db, freshComments.length
-	? handle => resolveHandleChannelId(handle, options.accessToken, options.deadline)
-	: undefined);
 const { handles, handleLookupError } = await loadAuthorHandles(freshComments, options.accessToken, options.deadline);
+const allowlist = await loadProtectedAuthors(channelId, db, freshComments.map(comment => comment.authorChannelId), handles,
+	handle => resolveHandleChannelId(handle, options.accessToken, options.deadline));
 const newComments = freshComments.map(comment => ({ ...comment, authorHandle: handles.get(comment.authorChannelId) ?? null }));
 // A ticked protection flag forces the tone pass on even below
 // TONE_LEVEL_OMNI_AND_TONE: the channel owner asked for heightened scrutiny,

@@ -56,6 +56,10 @@ export class YoutubeWriteRefusedError extends Error {
 	}
 }
 
+export class GoogleGrantExpiredError extends Error {
+	constructor(message: string) { super(message); this.name = 'GoogleGrantExpiredError'; }
+}
+
 function writeFailure(status: number, message: string): Error {
 	return [400, 401, 403, 405, 422, 429].includes(status) ? new YoutubeWriteRefusedError(message) : new Error(message);
 }
@@ -79,7 +83,17 @@ function optionalPageToken(value: unknown): string | null {
 
 async function jsonResponse(response: Response, operation: string): Promise<unknown> {
 	const body = await response.text();
-	if (!response.ok) throw new Error(`${operation} failed: ${response.status} ${body}`);
+	if (!response.ok) {
+		const failure = new Error(`${operation} failed: ${response.status} ${body}`);
+		if (operation === 'token refresh' && [400, 401].includes(response.status)) {
+			let payload: unknown;
+			try { payload = JSON.parse(body); } catch { throw failure; }
+			if (payload && typeof payload === 'object' && !Array.isArray(payload) && (payload as JsonObject).error === 'invalid_grant') {
+				throw new GoogleGrantExpiredError(failure.message);
+			}
+		}
+		throw failure;
+	}
 	try {
 		return JSON.parse(body) as unknown;
 	} catch {

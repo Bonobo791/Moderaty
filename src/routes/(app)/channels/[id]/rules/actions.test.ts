@@ -2,7 +2,7 @@ import { beforeEach, expect, test, vi } from 'vitest';
 import { TEST_OWNER, postForm, setupTestDb, testDb } from '$lib/server/testdb';
 import { channelAllowedHandles, channels, rules } from '$lib/server/db/schema';
 
-import { HandleNotFoundError } from '$lib/server/youtube';
+import { HandleNotFoundError, GoogleGrantExpiredError } from '$lib/server/youtube';
 import { encrypt } from '$lib/server/crypto';
 const provider = vi.hoisted(() => ({ resolve: vi.fn(), refresh: vi.fn() }));
 vi.mock('$env/dynamic/private', () => ({ env: { ENCRYPTION_KEY: 'synthetic-test-key' } }));
@@ -257,7 +257,7 @@ test('addHandle validates, normalizes, and stores the handle', async () => {
 
 	vi.useFakeTimers({ toFake: ['Date'] });
 	vi.setSystemTime(new Date('2026-10-09T00:00:00.000Z'));
-	let res;
+	let res: Awaited<ReturnType<typeof addHandle>>;
 	try { res = await addHandle('UC1', '  @SomeUser '); } finally { vi.useRealTimers(); }
 	expect(res).toEqual({ ok: true });
 
@@ -441,4 +441,11 @@ test('database failures during handle removal return a generic service error and
 		expect(log).toHaveBeenCalledWith('protected handle configuration failed', 'UC1', diagnostic);
 		expect(await handleRows()).toHaveLength(1);
 	} finally {remove.mockRestore(); log.mockRestore();}
+});
+
+test('an expired refresh grant gives a safe reconnect instruction without changing protection', async () => {
+	await seedChannel('UC1');
+	provider.refresh.mockRejectedValueOnce(new GoogleGrantExpiredError('synthetic-private-detail'));
+	expect(await addHandle('UC1','someuser')).toMatchObject({status:401,data:{error:'YouTube access expired — reconnect the channel; protection was not changed'}});
+	expect(await handleRows()).toEqual([]);
 });

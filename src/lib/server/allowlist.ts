@@ -3,6 +3,7 @@
 
 import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 
+import { HandleNotFoundError } from '$lib/server/youtube';
 import { DeadlineExceededError } from '$lib/server/http';
 import { db } from '$lib/server/db';
 import { channelAllowedHandles, channels } from '$lib/server/db/schema';
@@ -137,9 +138,33 @@ export async function loadHandleSet(channelId: string): Promise<Set<string>> {
 
 export interface ProtectedIdentities {
 	byChannelId: Map<string, string>;
-	proofs?: Map<number, {handle: string; channelId: string}>;
+	proofs?: Map<number, {handle: string; channelId: string | null}>;
 	unresolved: boolean;
 	configured: boolean;
+	observedAuthorIds?: Set<string>;
+}
+
+/** Match observed authors in batches; resolve handles remotely only for missing author metadata. */
+export async function loadProtectedAuthors(
+	channelId: string,
+	reader: HandleReader,
+	authorIds: string[],
+	handles: Map<string, string>,
+	resolve: (handle: string) => Promise<string>,
+	previous?: ProtectedIdentities
+): Promise<ProtectedIdentities> {
+	if (!authorIds.length) return loadProtectedIdentities(channelId, reader);
+	const byHandle = new Map([...handles].map(([id, handle]) => [handle, id]));
+	const missing = authorIds.some(id => !handles.has(id));
+	// An absence inferred for one page cannot prove absence for a different set of authors.
+	const reusable = missing && previous ? { ...previous, proofs: new Map([...previous.proofs ?? []].filter(([, proof]) => proof.channelId !== null)) } : undefined;
+	const protection = await loadProtectedIdentities(channelId, reader, async handle => {
+		const id = byHandle.get(handle);
+		if (id) return id;
+		if (missing) return resolve(handle);
+		throw new HandleNotFoundError();
+	}, reusable);
+	return { ...protection, observedAuthorIds: new Set(authorIds) };
 }
 
 /** Resolve current holders once per snapshot; reuse only unchanged row/handle proofs.
@@ -152,8 +177,10 @@ export async function loadProtectedIdentities(
 ): Promise<ProtectedIdentities> {
 	const rows = await listHandles(channelId, reader);
 	if (rows.length > MAX_HANDLES_PER_CHANNEL) throw new HandleConfigurationError('protected handle configuration exceeds the supported limit');
-	const proofs = new Map<number, {handle: string; channelId: string}>();
+	const proofs = new Map<number, {handle: string; channelId: string | null}>();
 	let unresolved = false;
+	let failures = 0;
+	let firstFailure: unknown;
 	// Five concurrent lookups, at most 100 configured handles, all deadline-bound
 	// by the provider resolver. No network call is made within a write transaction.
 	for (let index = 0; index < rows.length; index += 5) {
@@ -167,15 +194,18 @@ export async function loadProtectedIdentities(
 				proofs.set(row.id, {handle: row.handle, channelId: id});
 			} catch (error) {
 				if (error instanceof DeadlineExceededError) throw error;
+				if (error instanceof HandleNotFoundError) { proofs.set(row.id, { handle: row.handle, channelId: null }); return; }
 				unresolved = true;
-				console.error('protected handle resolution failed; comments will be held for review', error);
+				failures += 1;
+				firstFailure ??= error;
 			}
 		}));
 	}
+	if (failures) console.error('protected handle resolution failed; comments will be held for review', { channelId, failures }, firstFailure);
 	const byChannelId = new Map<string, string>();
 	for (const row of rows) {
 		const proof = proofs.get(row.id);
-		if (proof && !byChannelId.has(proof.channelId)) byChannelId.set(proof.channelId, proof.handle);
+		if (proof?.channelId && !byChannelId.has(proof.channelId)) byChannelId.set(proof.channelId, proof.handle);
 	}
 	return {byChannelId, proofs, unresolved, configured: rows.length > 0};
 }

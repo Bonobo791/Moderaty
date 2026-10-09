@@ -742,3 +742,8 @@ test.each([{}, { items: null }, null, [], { items: 0 }, { items: {} }, { items: 
 	expect(error).toBeInstanceOf(Error);
 	expect(error).not.toBeInstanceOf(HandleNotFoundError);
 });
+
+test('a structured expired refresh grant is distinguishable from other provider failures', async () => {
+	vi.stubGlobal('fetch', async () => Response.json({error:'invalid_grant',error_description:'synthetic-private-detail'},{status:400}));
+	await expect(refreshAccessToken('synthetic-refresh')).rejects.toMatchObject({name:'GoogleGrantExpiredError'});
+});

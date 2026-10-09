@@ -9,7 +9,7 @@ import {
 	removeHandle as removeAllowedHandle
 } from '$lib/server/allowlist';
 import { decrypt } from '$lib/server/crypto';
-import { HandleNotFoundError, refreshAccessToken, resolveHandleChannelId } from '$lib/server/youtube';
+import { HandleNotFoundError, GoogleGrantExpiredError, refreshAccessToken, resolveHandleChannelId } from '$lib/server/youtube';
 import { ownedChannel } from '$lib/server/ownership';
 import { and, eq } from 'drizzle-orm';
 import { fail } from '@sveltejs/kit';
@@ -75,6 +75,7 @@ export const actions = {
 			if (e instanceof HandleNotFoundError) return fail(400, {error:e.message});
 			if (e instanceof HandleConfigurationError) return fail(e.status, {error:e.message});
 			console.error('protected handle configuration failed', params.id, e);
+			if (e instanceof GoogleGrantExpiredError) return fail(401, {error:'YouTube access expired — reconnect the channel; protection was not changed'});
 			return fail(503, {error:'Protected handle configuration is unavailable; protection was not changed'});
 		}
 		return { ok: true };

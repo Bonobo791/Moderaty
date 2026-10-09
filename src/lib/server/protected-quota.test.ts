@@ -68,7 +68,7 @@ test('an idle run makes no protected-handle lookups', async () => {
 test('scoring and enforcement share current-run proofs, and a repeated page costs no handle lookup', async () => {
 	page = [{id:'thread',snippet:{topLevelComment:{id:'ordinary-comment',snippet:{authorChannelId:{value:'ordinary-author'},authorDisplayName:'Different Name',textDisplay:'ban-trigger',publishedAt:'2026-10-09T00:00:00Z'}}}}];
 	expect(await runChannel('owner',{forceDryRun:false})).toMatchObject({fetched:1,acted:1,partial:false});
-	expect(lookups).toEqual(['protected_handle']);
+	expect(lookups).toEqual([]);
 	expect(writes).toHaveLength(1);
 	expect(new URL(writes[0]).searchParams.get('banAuthor')).toBe('true');
 	expect(await testDb().db.select().from(moderationActions).all()).toEqual([expect.objectContaining({state:'completed',action:'ban'})]);
@@ -76,4 +76,12 @@ test('scoring and enforcement share current-run proofs, and a repeated page cost
 	expect(await runChannel('owner',{forceDryRun:false})).toMatchObject({acted:0,partial:false});
 	expect(lookups).toEqual([]);
 	expect(writes).toEqual([]);
+});
+
+test('100 configured handles do not require per-handle lookups for verified page authors', async () => {
+	await testDb().db.insert(channelAllowedHandles).values(Array.from({length:99},(_,index)=>({channelId:'owner',handle:`protected_${index}`})));
+	page = [{id:'thread',snippet:{topLevelComment:{id:'ordinary-comment',snippet:{authorChannelId:{value:'ordinary-author'},textDisplay:'ban-trigger',publishedAt:'2026-10-09T00:00:00Z'}}}}];
+	expect(await runChannel('owner',{forceDryRun:false})).toMatchObject({acted:1,partial:false});
+	expect(lookups).toEqual([]);
+	expect(writes).toHaveLength(1);
 });

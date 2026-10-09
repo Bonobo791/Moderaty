@@ -137,7 +137,7 @@ test('the introduction workflow runs its pinned collector even when the base has
 	const workflow = readFileSync(new URL('../.github/workflows/test-quality-sentinel.md', import.meta.url), 'utf8');
 	expect(workflow).toMatch(/  pull_request_target:\n/);
 	expect(workflow).toContain('model: gpt-5.4');
-	expect(workflow).not.toContain('github.event.pull_request.stack.position');
+	expect(workflow).not.toMatch(/github\.event\.pull_request\.stack\.position/);
 	const collectorCheckout = workflow.match(/- name: Check out pinned evidence collector[\s\S]*?(?=  - name:)/)?.[0];
 	expect(collectorCheckout).toMatch(/ref: [a-f0-9]{40}/);
 	expect(collectorCheckout).toContain('path: .sentinel-collector');
@@ -249,4 +249,9 @@ test.each([
 
 test("Sentinel is source-only until the user re-enables its compiled workflow", () => {
 	expect(existsSync(new URL("../.github/workflows/test-quality-sentinel.lock.yml", import.meta.url))).toBe(false);
+});
+
+test('migration SQL is included as full production evidence', () => {
+	const f = fixture({'drizzle/0072_example.sql':'SELECT 1;\n'}, {'drizzle/0072_example.sql':'SELECT 2;\n'});
+	expect(collectContext(f).productionChanges).toEqual([expect.objectContaining({path:'drizzle/0072_example.sql',before:'SELECT 1;\n',after:'SELECT 2;\n'})]);
 });

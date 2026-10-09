@@ -55,7 +55,7 @@ test('new unresolved protection replaces stale destructive actions with review h
 	const stale = await decide(comment, rules, await loadProtectedIdentities('owner', undefined, resolver), null, { remaining: 0 }, options);
 	expect(stale.youtubeAction).toBe('ban');
 	await testDb().db.insert(channelAllowedHandles).values({ channelId: 'owner', handle: 'unresolved_handle' });
-	vi.stubGlobal('fetch', async () => Response.json({items:[]}));
+	vi.stubGlobal('fetch', async () => new Response('synthetic-provider-outage', {status:503}));
 	expect(await stage([stale])).toMatchObject({ acted: 1, queued: 1 });
 	expect(await testDb().db.select().from(moderationActions).all()).toEqual([expect.objectContaining({ action: 'hold' })]);
 	expect(await testDb().db.select().from(comments).all()).toEqual([expect.objectContaining({ status: 'pending', decidedBy: 'none' })]);
@@ -87,4 +87,44 @@ test('a protection added after staging supersedes a pending ban before YouTube d
 	expect(writes).toEqual([]);
 	expect(await testDb().db.select().from(moderationActions).all()).toEqual([expect.objectContaining({state:'superseded', action:'ban'})]);
 	expect(await testDb().db.select().from(comments).all()).toEqual([expect.objectContaining({status:'approved', decidedBy:'allowlist'})]);
+});
+
+test('new protection cancels a dispatched ban before it can be retried', async () => {
+	const stale = await decide(comment, rules, await loadProtectedIdentities('owner'), null, {remaining:0}, options);
+	await stage([stale]);
+	await testDb().db.update(moderationActions).set({state:'dispatched'});
+	await testDb().db.insert(channelAllowedHandles).values({channelId:'owner',handle:'protected_handle'});
+	const writes: URL[] = [];
+	vi.stubGlobal('fetch', async (input: string | URL | Request, init?: RequestInit) => {
+		const url = new URL(input instanceof Request ? input.url : String(input));
+		if (init?.method === 'POST') {writes.push(url); return new Response(null,{status:204});}
+		if (url.pathname.endsWith('/channels')) return Response.json({items:[{id:'protected-author',snippet:{customUrl:'@protected_handle'}}]});
+		if (url.pathname.endsWith('/comments')) return Response.json({items:[{id:comment.id,snippet:{authorChannelId:{value:'protected-author'}}}]});
+		throw new Error('Unexpected provider request');
+	});
+	await runEnforcement('owner','synthetic-token',undefined,null,0);
+	expect(writes).toEqual([]);
+	expect(await testDb().db.select().from(moderationActions).all()).toEqual([expect.objectContaining({state:'cancelling'})]);
+	await runEnforcement('owner','synthetic-token',undefined,null,0);
+	expect(writes.map(url=>url.searchParams.get('moderationStatus'))).toEqual(['published']);
+	expect(writes.every(url=>url.searchParams.get('banAuthor') !== 'true')).toBe(true);
+	expect(await testDb().db.select().from(moderationActions).all()).toEqual([expect.objectContaining({state:'superseded'})]);
+});
+
+test('author lookup outage still applies unrelated holds while retaining destructive intents for retry', async () => {
+	const stale = await decide(comment, rules, await loadProtectedIdentities('owner'), null, {remaining:0}, options);
+	await stage([stale, {...stale, comment:{...comment,id:'safe-hold'},status:'held',youtubeAction:'hold'}]);
+	await testDb().db.insert(channelAllowedHandles).values({channelId:'owner',handle:'protected_handle'});
+	const writes: URL[] = [];
+	vi.stubGlobal('fetch', async (input: string | URL | Request, init?: RequestInit) => {
+		const url = new URL(input instanceof Request ? input.url : String(input));
+		if (init?.method === 'POST') {writes.push(url);return new Response(null,{status:204});}
+		return new Response('synthetic-quota-outage',{status:403});
+	});
+	await expect(runEnforcement('owner','synthetic-token',undefined,null,0)).rejects.toThrow('403');
+	expect(writes.map(url=>url.searchParams.get('moderationStatus'))).toEqual(['heldForReview']);
+	expect(await testDb().db.select().from(moderationActions).all()).toEqual(expect.arrayContaining([
+		expect.objectContaining({commentId:comment.id,state:'pending',action:'ban'}),
+		expect.objectContaining({commentId:'safe-hold',state:'completed',action:'hold'})
+	]));
 });

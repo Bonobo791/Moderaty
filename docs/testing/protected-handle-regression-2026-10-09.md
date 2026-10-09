@@ -202,3 +202,17 @@ errors or warnings, E2E type check and production build passed. The Chromium
 case passed with dotenv present; the intentional isolation-negative probe
 failed for the expected reason. The two earlier privacy/handle-log design
 blockers remain unresolved. No fixes from this review have been published.
+
+### CI triage follow-up
+
+Current runs match protections against batched authoritative author handles in
+memory. Individual handle resolution remains the fallback for missing metadata;
+valid absence does not hold unrelated authors. Destructive retries, including
+already dispatched intents, recheck protection. Identity outages allow unrelated
+review holds to complete and then surface the original failure.
+
+Migration 0073 supersedes the physical-column removal described above: the atomic
+0072/0073 chain purges historical identifiers and restores an empty nullable
+compatibility column for the previous image's reads. The application schema does
+not expose or write it. Removing it is a future contract migration after old
+images are retired. Only the isolated dev-2 database was migrated in this triage.

@@ -16,7 +16,8 @@ const mocks = vi.hoisted(() => ({
 
 // staging → enforcement → youtube: only the network surface is stubbed (the
 // rescan path never calls it — assertChannelActive is a pure db guard).
-vi.mock('$lib/server/youtube', () => ({
+vi.mock('$lib/server/youtube', async (importOriginal) => ({
+	...(await importOriginal<typeof import('$lib/server/youtube')>()),
 	refreshAccessToken: mocks.refreshAccessToken,
 	fetchNewComments: mocks.fetchNewComments,
 	fetchVideoMetadata: mocks.fetchVideoMetadata,

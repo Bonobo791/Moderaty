@@ -72,8 +72,12 @@ function loggingFailed() {
 	}
 }
 
-function safePattern(value: unknown, pattern: RegExp): string | null {
-	return typeof value === 'string' && pattern.test(value) ? value : null;
+function safeRequestId(value: unknown): string | null {
+	return typeof value === 'string' && UUID.test(value) ? value : null;
+}
+
+function safeRelease(value: unknown): string | null {
+	return typeof value === 'string' && RELEASE.test(value) ? value : null;
 }
 
 function validatedEvent(event: OperationalEvent) {
@@ -88,9 +92,9 @@ function validatedEvent(event: OperationalEvent) {
 		severity: allowed(severity, SEVERITIES, 'error'),
 		category: allowed(category, CATEGORIES, 'unknown'),
 		route: typeof route === 'string' && ROUTES.has(route) ? route : null,
-		requestId: safePattern(requestId, UUID),
+		requestId: safeRequestId(requestId),
 		environment: allowed(environment, [...ENVIRONMENTS, 'unknown'], 'unknown'),
-		release: safePattern(release, RELEASE)
+		release: safeRelease(release)
 	};
 }
 
@@ -98,7 +102,10 @@ function validatedEvent(event: OperationalEvent) {
 export function emitOperationalEvent(event: OperationalEvent): void {
 	try {
 		const record = validatedEvent(event);
-		console[record.severity](JSON.stringify(record));
+		const line = JSON.stringify(record);
+		if (record.severity === 'info') console.info(line);
+		else if (record.severity === 'warn') console.warn(line);
+		else console.error(line);
 	} catch {
 		loggingFailed();
 	}

@@ -16,7 +16,8 @@ type Event = Parameters<Handle>[0]['event'];
 
 function cacheResponse(response: Response, event: Event): Response {
 	const etag = response.headers.get('etag');
-	const clientTag = event.request?.headers.get('if-none-match')?.replace(/^W\/(?=")/, '');
+	const clientHeader = event.request?.headers.get('if-none-match');
+	const clientTag = clientHeader?.startsWith('W/"') ? clientHeader.slice(2) : clientHeader;
 	if (response.status !== 200 || etag === null || clientTag !== etag) return response;
 	const cacheHeaders = new Set(['etag', 'cache-control', 'content-location', 'date', 'expires', 'vary', 'set-cookie']);
 	const headers = new Headers(Array.from(response.headers).filter(([key]) => cacheHeaders.has(key)));
@@ -84,9 +85,10 @@ export const handle: Handle = async (input) => {
 		}
 		const locale = isBilingualPath(event.url.pathname)
 			? resolveLocale({ cookie: event.cookies.get(LOCALE_COOKIE), acceptLanguage: event.request?.headers.get('accept-language') }) : 'en';
-		const html = errorPage.replace('<html lang="en">', `<html lang="${locale}">`)
-			.replaceAll('%sveltekit.status%', String(status))
-			.replaceAll('%sveltekit.error.message%', escapeHtml(body.message ?? 'Internal Error'));
+		const htmlLang = locale === 'pt-BR' ? '<html lang="pt-BR">' : '<html lang="en">';
+		const html = errorPage.replace('<html lang="en">', htmlLang)
+			.split('%sveltekit.status%').join(String(status))
+			.split('%sveltekit.error.message%').join(escapeHtml(body.message ?? 'Internal Error'));
 		return correlate(new Response(html, { status, headers: { 'content-type': 'text/html; charset=utf-8' } }), event);
 	}
 };

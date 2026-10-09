@@ -40,6 +40,10 @@ jobs:
           set -euo pipefail
           policy="$GITHUB_WORKSPACE/policy"
           if [ ! -f "$policy/.github/overlock/package-lock.json" ]; then
+            if [ -f "$policy/.github/workflows/overlock.yml" ]; then
+              echo '::error::The established base Overlock policy is missing its lockfile; refusing candidate policy.'
+              exit 1
+            fi
             # First installation has no policy on its base branch. This is
             # explicitly a bootstrap, not proof of an independent gate.
             policy="$GITHUB_WORKSPACE/candidate"

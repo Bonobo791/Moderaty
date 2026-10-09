@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { runFailureAction } from '$lib/runHealth';
 	import { enhance } from '$app/forms';
 	import { autoRefresh } from '$lib/auto-refresh.svelte';
 	import { armIntentRelease } from '$lib/intentRelease';
@@ -275,6 +276,7 @@
 		{:else if form?.skipped}
 			<p class="muted" role="status">Dry run preview: nothing new to preview right now.</p>
 		{:else if form?.ok}
+			{#if form.handleLookupError}<p class="error-box" role="alert">{runFailureAction('handles')}</p>{/if}
 			<p class="muted" role="status">
 				Dry run preview ({form.months === 'all' ? 'all time' : form.months === 1 ? 'last month' : `last ${form.months} months`}): {form.fetched} comment{form.fetched === 1 ? '' : 's'} scanned —
 				{form.acted} would be acted on, {form.queued} would go to the review queue.

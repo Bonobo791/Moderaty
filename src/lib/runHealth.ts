@@ -3,6 +3,7 @@
 // the dashboard status cell and the channel header (PR #142: identical
 // states must read identically on both surfaces).
 const FAILURE_ACTIONS: Record<string, string> = {
+	handles: 'YouTube author handles could not be loaded; moderation continued, but some audit entries have no handle.',
 	token: 'YouTube access expired — reconnect the channel',
 	credits: 'AI credits ran out — top up on the usage page; we retry on the next check',
 	quota: 'YouTube quota is exhausted — we retry on the next check',

@@ -39,6 +39,14 @@ globalThis.fetch = async (input, init) => {
 		if (url.pathname === '/youtube/v3/commentThreads' && url.searchParams.get('allThreadsRelatedToChannelId') === channelId) {
 			return Response.json(commentPage());
 		}
+		if (url.pathname === '/youtube/v3/channels' && url.searchParams.get('part') === 'snippet') {
+			const ids = url.searchParams.get('id')?.split(',') ?? [];
+			return Response.json({items:authorChannels.items.filter(item => ids.includes(item.id))});
+		}
+		if (url.pathname === '/youtube/v3/comments' && url.searchParams.get('part') === 'snippet') {
+			const ids = url.searchParams.get('id')?.split(',') ?? [];
+			return Response.json({items:commentPage().items.map(item => item.snippet.topLevelComment).filter(item => ids.includes(item.id))});
+		}
 		if (url.pathname === '/youtube/v3/channels' && url.searchParams.get('part') === 'id' && url.searchParams.get('forHandle')) {
 			const handle = url.searchParams.get('forHandle').replace(/^@/, '').toLowerCase();
 			return Response.json({ items: authorChannels.items.filter((item) => item.snippet.customUrl.slice(1).toLowerCase() === handle).map(({ id }) => ({ id })) });

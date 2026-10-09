@@ -56,6 +56,10 @@ export class YoutubeWriteRefusedError extends Error {
 	}
 }
 
+export class GoogleGrantExpiredError extends Error {
+	constructor(message: string) { super(message); this.name = 'GoogleGrantExpiredError'; }
+}
+
 function writeFailure(status: number, message: string): Error {
 	return [400, 401, 403, 405, 422, 429].includes(status) ? new YoutubeWriteRefusedError(message) : new Error(message);
 }
@@ -79,7 +83,17 @@ function optionalPageToken(value: unknown): string | null {
 
 async function jsonResponse(response: Response, operation: string): Promise<unknown> {
 	const body = await response.text();
-	if (!response.ok) throw new Error(`${operation} failed: ${response.status} ${body}`);
+	if (!response.ok) {
+		const failure = new Error(`${operation} failed: ${response.status} ${body}`);
+		if (operation === 'token refresh' && [400, 401].includes(response.status)) {
+			let payload: unknown;
+			try { payload = JSON.parse(body); } catch { throw failure; }
+			if (payload && typeof payload === 'object' && !Array.isArray(payload) && (payload as JsonObject).error === 'invalid_grant') {
+				throw new GoogleGrantExpiredError(failure.message);
+			}
+		}
+		throw failure;
+	}
 	try {
 		return JSON.parse(body) as unknown;
 	} catch {
@@ -388,10 +402,10 @@ export class HandleNotFoundError extends Error {
 }
 
 /** Resolve the handle filter to its authoritative channel identity. */
-export async function resolveHandleChannelId(handle: string, accessToken: string): Promise<string> {
+export async function resolveHandleChannelId(handle: string, accessToken: string, deadline?: number): Promise<string> {
 	const params = new URLSearchParams({ part: 'id', forHandle: handle });
-	const response = await ytFetch(`/channels?${params}`, accessToken);
-	if (!response.ok) throw new Error('YouTube handle lookup unavailable; protection was not changed');
+	const response = await ytFetch(`/channels?${params}`, accessToken, {}, deadline);
+	if (!response.ok) throw new YoutubeLookupError(response.status, await response.text());
 	const payload = object(await response.json(), 'YouTube handle lookup response');
 	const items: unknown = payload.items;
 	if (!Array.isArray(items)) throw new Error('YouTube handle lookup returned malformed data');
@@ -401,4 +415,61 @@ export async function resolveHandleChannelId(handle: string, accessToken: string
 	const id = requiredString(item.id, 'YouTube handle lookup channel identity');
 	if (!id.trim() || id !== id.trim()) throw new Error('YouTube handle lookup returned an invalid channel identity');
 	return id;
+}
+
+/** Provider details remain server-side; form actions return fixed messages. */
+export class YoutubeLookupError extends Error {
+	constructor(readonly httpStatus: number, body: string) {
+		super(`YouTube handle lookup failed: HTTP ${httpStatus} ${body}`);
+	}
+}
+
+async function fetchIdentitySnippets(resource: 'channels' | 'comments', ids: string[], accessToken: string, deadline?: number) {
+	const result = new Map<string, Record<string, unknown>>();
+	let skippedItems = 0;
+	const unique = [...new Set(ids.filter(Boolean))];
+	for (let index = 0; index < unique.length; index += YOUTUBE_ID_BATCH_SIZE) {
+		const batch = unique.slice(index, index + YOUTUBE_ID_BATCH_SIZE);
+		const params = new URLSearchParams({part: 'snippet', id: batch.join(','), maxResults: '50'});
+		const response = await ytFetch(`/${resource}?${params}`, accessToken, {}, deadline);
+		const payload = object(await jsonResponse(response, `${resource}.list identity lookup`), 'identity lookup response');
+		if (!Array.isArray(payload.items)) throw new Error('Identity lookup returned malformed items');
+		for (const raw of payload.items) {
+			try {
+				const item = object(raw, 'identity lookup item');
+				const id = requiredString(item.id, 'identity lookup ID');
+				if (!batch.includes(id)) throw new Error('Unexpected identity lookup ID');
+				result.set(id, object(item.snippet, 'identity lookup snippet'));
+			} catch { skippedItems += 1; }
+		}
+	}
+	if (skippedItems) console.warn('YouTube identity lookup skipped malformed items', { resource, skippedItems });
+	return { snippets: result, skippedItems };
+}
+
+/** Authoritative normalized handles for audit retention; IDs stay in memory. */
+export async function fetchAuthorHandles(ids: string[], accessToken: string, deadline?: number): Promise<Map<string, string> & { skippedItems?: number }> {
+	const { snippets, skippedItems } = await fetchIdentitySnippets('channels', ids, accessToken, deadline);
+	const result = new Map<string, string>();
+	for (const [id, snippet] of snippets) {
+		const raw = snippet.customUrl;
+		if (typeof raw !== 'string' || !raw.startsWith('@')) continue;
+		const handle = raw.slice(1).toLowerCase();
+		if (/^[\p{L}\p{N}._-]{3,30}$/u.test(handle)) result.set(id, handle);
+	}
+	return skippedItems ? Object.assign(result, { skippedItems }) : result;
+}
+
+/** Re-read pending comment authors before destructive enforcement, without storage. */
+export async function fetchCommentAuthorIds(ids: string[], accessToken: string, deadline?: number): Promise<Map<string, string>> {
+	const { snippets } = await fetchIdentitySnippets('comments', ids, accessToken, deadline);
+	const result = new Map<string, string>();
+	for (const [id, snippet] of snippets) {
+		const author = snippet.authorChannelId;
+		if (author && typeof author === 'object' && !Array.isArray(author)) {
+			const value = (author as Record<string, unknown>).value;
+			if (typeof value === 'string' && value.trim() === value && value) result.set(id, value);
+		}
+	}
+	return result;
 }

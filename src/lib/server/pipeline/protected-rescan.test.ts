@@ -4,11 +4,11 @@ import { setupTestDb, testDb } from '$lib/server/testdb';
 import { auditLog, channels, comments, creditTransactions, organizations } from '$lib/server/db/schema';
 import type { NewComment } from '$lib/server/youtube';
 
-const model = vi.hoisted(() => ({ scoreComment: vi.fn(), scoreTone: vi.fn(), detectJailbreak: vi.fn(), fetchVideoMetadata: vi.fn() }));
+const model = vi.hoisted(() => ({ scoreComment: vi.fn(), scoreTone: vi.fn(), detectJailbreak: vi.fn(), fetchVideoMetadata: vi.fn(), fetchAuthorHandles: vi.fn() }));
 vi.mock('$lib/server/moderation', () => ({ scoreComment: model.scoreComment, serializeScores: () => '{}' }));
 vi.mock('$lib/server/tone', () => ({ scoreTone: model.scoreTone }));
 vi.mock('$lib/server/jailbreak', () => ({ detectJailbreak: model.detectJailbreak }));
-vi.mock('$lib/server/youtube', async (original) => ({ ...await original<typeof import('$lib/server/youtube')>(), fetchVideoMetadata: model.fetchVideoMetadata }));
+vi.mock('$lib/server/youtube', async (original) => ({ ...await original<typeof import('$lib/server/youtube')>(), fetchVideoMetadata: model.fetchVideoMetadata, fetchAuthorHandles:model.fetchAuthorHandles }));
 import { decideNewComments } from './scoring';
 import { stageDecisions, stageOrAuditDecisions } from './staging';
 
@@ -19,6 +19,7 @@ beforeEach(async () => {
 	model.scoreTone.mockResolvedValue({ score: 0 });
 	model.detectJailbreak.mockResolvedValue({ flagged: false, confidence: 0.1 });
 	model.fetchVideoMetadata.mockResolvedValue(new Map());
+	model.fetchAuthorHandles.mockResolvedValue(new Map());
 	await testDb().db.insert(organizations).values({ id: 'org', name: 'Org', creditsRemaining: 1 });
 	await testDb().db.insert(channels).values({ id: 'channel', userId: 'owner', orgId: 'org', title: 'Channel', refreshTokenEnc: 'enc' });
 });

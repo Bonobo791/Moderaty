@@ -51,7 +51,7 @@
 {/each}
 
 <h2>Protected handles</h2>
-<p class="page-sub">Handles are verified with YouTube. Protection follows the same YouTube account, even if its name or handle changes.</p>
+<p class="page-sub">Handles are verified with YouTube. Protection follows the handle: whichever account currently holds it is protected.</p>
 <p class="page-sub">{data.handles.length}/100 protected handles</p>
 
 <div class="card">
@@ -73,13 +73,7 @@
 	<div class="card" style="display:flex; justify-content:space-between; align-items:center">
 		<div>
 			<code>@{h.handle}</code>
-			{#if !h.resolvedChannelId}
-				<p>Verification needed. Comments are held for review until this handle is verified.</p>
-				<form method="POST" action="?/addHandle">
-					<input type="hidden" name="handle" value={h.handle} />
-					<button class="btn small" type="submit">Verify @{h.handle}</button>
-				</form>
-			{/if}
+			<p>Protection follows this handle. Its current owner is verified during each check.</p>
 		</div>
 		<form class="inline" method="POST" action="?/removeHandle">
 			<input type="hidden" name="handleId" value={h.id} />

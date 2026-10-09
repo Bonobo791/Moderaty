@@ -1,11 +1,13 @@
 import { and, eq, isNull } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
+import { runFailureAction } from '$lib/runHealth';
 import { decrypt } from '$lib/server/crypto';
 import { db } from '$lib/server/db';
 import { channels } from '$lib/server/db/schema';
 import { DeadlineExceededError } from '$lib/server/http';
 import { channelMatchesClaim } from '$lib/server/dryRun';
 import { resolveOpenAiKey } from '$lib/server/openaiKey';
+import type { ProtectedIdentities } from '$lib/server/allowlist';
 import { TONE_LEVEL_OMNI_ONLY } from '$lib/toneLevels';
 import { fetchNewComments, refreshAccessToken, type CommentPage } from '$lib/server/youtube';
 import { assertChannelActive, ChannelDeactivatedError, runEnforcement } from './enforcement';
@@ -158,9 +160,9 @@ const decideAndStage = async (
 		window: RunChannelOptions['window'];
 		rescan: { chargeScope: string | null; scanStamp: string } | undefined;
 	}
-): Promise<{ acted: number; queued: number; skipped: number; deferred: number; stagedCount: number }> => {
+): Promise<{ acted: number; queued: number; skipped: number; deferred: number; stagedCount: number; handleLookupError: boolean; protection: ProtectedIdentities }> => {
 	const { channel, accessToken, deadline, dryRun, window, rescan } = ctx;
-	const { decisions, failures, deferred, protectedIds } = await decideNewComments(channelId, page, {
+	const { decisions, failures, deferred, protectedIds, protection, handleLookupError } = await decideNewComments(channelId, page, {
 		accessToken,
 		toneLevel: channel.toneLevel ?? TONE_LEVEL_OMNI_ONLY,
 		protections: {
@@ -191,13 +193,17 @@ const decideAndStage = async (
 	// Deletion may have committed during the YouTube/AI calls above: re-check
 	// before any durable write (I3) so a deleted account gets no new rows.
 	await assertChannelActive(channelId, db, channel);
-	const { acted, queued, stagedCount } = await stageOrAuditDecisions(channelId, decisions, dryRun, { orgId: channel.orgId, expected: channel, rescan, protectedIds });
+	// Background previews have no form response; retain the warning in their visible audit rows.
+	const auditDecisions = dryRun && handleLookupError
+		? decisions.map(decision => ({ ...decision, reason: [decision.reason, runFailureAction('handles')].filter(Boolean).join('; ') }))
+		: decisions;
+	const { acted, queued, stagedCount } = await stageOrAuditDecisions(channelId, auditDecisions, dryRun, { orgId: channel.orgId, expected: channel, rescan, protectedIds, protection, accessToken, deadline });
 	// Fail loudly only after successful decisions are staged, and before the
 	// cursor advances, so the next run retries just the failed comments.
 	if (failures.length) {
 		throw new Error(`moderation decision failed for ${failures.length} comment(s): ${failures.join('; ')}`);
 	}
-	return { acted, queued, skipped: fetched - stagedCount - failures.length - deferred, deferred, stagedCount };
+	return { acted, queued, skipped: fetched - stagedCount - failures.length - deferred, deferred, stagedCount, protection, handleLookupError };
 };
 
 export async function runChannel(
@@ -247,26 +253,27 @@ export async function runChannel(
 
 		const staged = await decideAndStage(channelId, page, fetched, { channel, accessToken, deadline, dryRun, window, rescan });
 		const { skipped, deferred } = staged;
+		const warning = staged.handleLookupError ? { handleLookupError: true } : {};
 		acted = staged.acted;
 		queued = staged.queued;
 		if (dryRun) {
 			console.info(`run ${channelId}: dry run — fetched=${fetched} skippedAlreadySeen=${skipped} rescan=${rescan !== undefined} audited=${acted}`);
-			return finishDryRun(window, page, { fetched, acted, queued });
+			return { ...finishDryRun(window, page, { fetched, acted, queued }), ...warning };
 		}
 
-		const enforcement = await runEnforcement(channelId, accessToken, deadline, channel.orgId, deferred, channel);
+		const enforcement = await runEnforcement(channelId, accessToken, deadline, channel.orgId, deferred, channel, staged.protection);
 		acted = enforcement.acted;
 		if (enforcement.outOfCredits) {
 			console.warn(
 				`run ${channelId}: out of credits — ${deferred} comment(s) deferred, cursor parked; fetched=${fetched} skippedAlreadySeen=${skipped} rescan=${rescan !== undefined}`
 			);
-			return { fetched, acted, queued, partial: false, skipped: false, dryRun, outOfCredits: true };
+			return { fetched, acted, queued, partial: false, skipped: false, dryRun, outOfCredits: true, ...warning };
 		}
 		const { complete, cursor: newCursor } = await persistResults(channelId, channel, page);
 		console.info(
 			`run ${channelId}: fetched=${fetched} skippedAlreadySeen=${skipped} staged=${staged.stagedCount} deferred=${deferred} acted=${acted} queued=${queued} rescan=${rescan !== undefined}; scan ${complete ? `complete — cursor now ${newCursor}` : `continues next run (boundary ${channel.cursor})`}`
 		);
-		return { fetched, acted, queued, partial: false, skipped: false, dryRun };
+		return { fetched, acted, queued, partial: false, skipped: false, dryRun, ...warning };
 	} catch (error) {
 		if (error instanceof DeadlineExceededError) {
 			console.warn(`run ${channelId}: deadline reached — partial (fetched=${fetched})`);

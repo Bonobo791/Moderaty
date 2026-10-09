@@ -1,5 +1,6 @@
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { loadProtectedIdentities } from '$lib/server/allowlist';
+import { resolveHandleChannelId } from '$lib/server/youtube';
 import { protectedDecision } from './decisions';
 import { commentChargeRef, consumeCreditsBulk, type LedgerHandle } from '$lib/server/billing/ledger';
 import { db } from '$lib/server/db';
@@ -234,7 +235,7 @@ async function chargeBillableDecisions(
 
 /** Optional staging knobs: org to bill, channel identity for the liveness
  * assert, and rescan mode (upserts + scan-scoped charge anchors). */
-export type StageOptions = { orgId?: string | null; expected?: ChannelIdentity; rescan?: RescanCharge; protectedIds?: string[] };
+export type StageOptions = { orgId?: string | null; expected?: ChannelIdentity; rescan?: RescanCharge; protectedIds?: string[]; accessToken?: string; deadline?: number; protection?: Awaited<ReturnType<typeof loadProtectedIdentities>> };
 
 async function preserveRescanHumanClaims(transaction: LedgerHandle, channelId: string, decisions: Decision[], scanStamp?: string | null, protectedIds: string[] = []): Promise<Decision[]> {
 	const candidateIds = [...new Set([...decisions.map(decision => decision.comment.id), ...protectedIds])];
@@ -264,6 +265,9 @@ function decisionCounts(decisions: Decision[]): DecisionCounts {
 
 export async function stageDecisions(channelId: string, decisions: Decision[], options: StageOptions = {}) {
 	if (!decisions.length && !(options.rescan && options.protectedIds?.length)) return decisionCounts(decisions);
+	const accessToken = options.accessToken;
+	const snapshot = await loadProtectedIdentities(channelId, db,
+		accessToken ? handle => resolveHandleChannelId(handle, accessToken, options.deadline) : undefined, options.protection);
 	return await db.transaction(async (transaction) => {
 		// The channel check and all staging writes share one transaction. Account
 		// deletion either commits first (and this fails) or waits until these rows
@@ -273,12 +277,17 @@ export async function stageDecisions(channelId: string, decisions: Decision[], o
 		const handle = transaction as LedgerHandle;
 		// Verification and staging lock the same channel row. A protection that
 		// committed during scoring must take precedence over the stale verdict.
-		const protection = await loadProtectedIdentities(channelId, transaction);
+		const protection = await loadProtectedIdentities(channelId, transaction, undefined, snapshot);
 		const refreshedDecisions = decisions.map(decision => {
 			const protectedOutcome = protectedDecision(decision.comment, protection);
 			// The AI call already consumed budget even if protection changes its
 			// verdict. Preserve that fact for atomic, idempotent ledger charging.
-			return protectedOutcome ? { ...protectedOutcome, billable: decision.billable } : decision;
+			if (protectedOutcome) return {...protectedOutcome, billable: decision.billable};
+			if (decision.decidedBy === 'allowlist') {
+				return {...decision, comment: {...decision.comment, authorHandle: null}, status: 'pending', decidedBy: 'none',
+					matchedRuleId: null, aiScore: null, auditAction: 'queue', reason: 'protected handle changed during scoring', youtubeAction: 'hold' as const};
+			}
+			return decision;
 		});
 		const committedDecisions = options.rescan
 			? await preserveRescanHumanClaims(handle, channelId, refreshedDecisions, options.rescan.scanStamp, options.protectedIds) : refreshedDecisions;

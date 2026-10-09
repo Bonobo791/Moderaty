@@ -2,7 +2,7 @@ import { beforeEach, expect, test, vi } from 'vitest';
 import { TEST_OWNER, postForm, setupTestDb, testDb } from '$lib/server/testdb';
 import { channelAllowedHandles, channels, rules } from '$lib/server/db/schema';
 
-import { HandleNotFoundError } from '$lib/server/youtube';
+import { HandleNotFoundError, GoogleGrantExpiredError } from '$lib/server/youtube';
 import { encrypt } from '$lib/server/crypto';
 const provider = vi.hoisted(() => ({ resolve: vi.fn(), refresh: vi.fn() }));
 vi.mock('$env/dynamic/private', () => ({ env: { ENCRYPTION_KEY: 'synthetic-test-key' } }));
@@ -255,10 +255,16 @@ test('load returns this channel protected handles, newest first', async () => {
 test('addHandle validates, normalizes, and stores the handle', async () => {
 	await seedChannel('UC1');
 
-	const res = await addHandle('UC1', '  @SomeUser ');
+	vi.useFakeTimers({ toFake: ['Date'] });
+	vi.setSystemTime(new Date('2026-10-09T00:00:00.000Z'));
+	let res: Awaited<ReturnType<typeof addHandle>>;
+	try { res = await addHandle('UC1', '  @SomeUser '); } finally { vi.useRealTimers(); }
 	expect(res).toEqual({ ok: true });
 
-	expect(await handleRows()).toEqual([expect.objectContaining({ channelId: 'UC1', handle: 'someuser', resolvedChannelId: 'verified-author' })]);
+	expect(await handleRows()).toEqual([expect.objectContaining({ channelId: 'UC1', handle: 'someuser', createdAt: '2026-10-09T00:00:00.000Z' })]);
+	expect(provider.resolve).toHaveBeenCalledWith('someuser', 'synthetic-token');
+	expect((await handleRows())[0]).not.toHaveProperty('resolvedChannelId');
+	expect(JSON.stringify(await handleRows())).not.toContain('verified-author');
 });
 
 test('addHandle rejects an invalid handle with 400 and inserts nothing', async () => {
@@ -348,22 +354,22 @@ test('removeHandle rejects a signed-out request with 401 and the row survives', 
 test('failed verification leaves the protection database unchanged', async () => {
 	await seedChannel('UC1');
 	provider.resolve.mockRejectedValueOnce(new Error('lookup unavailable'));
-	expect(await addHandle('UC1', 'someuser')).toMatchObject({ status: 400 });
+	expect(await addHandle('UC1', 'someuser')).toMatchObject({ status: 503 });
 	expect(await handleRows()).toEqual([]);
 });
-test('existing legacy entry is resolved in place after explicit owner action', async () => {
+test('existing entered handle remains unchanged after explicit verification', async () => {
 	await seedChannel('UC1');
 	await testDb().db.insert(channelAllowedHandles).values({ channelId: 'UC1', handle: 'someuser' });
 	expect(await addHandle('UC1', 'someuser')).toEqual({ ok: true });
-	expect(await handleRows()).toEqual([expect.objectContaining({ resolvedChannelId: 'verified-author' })]);
+	expect(await handleRows()).toEqual([expect.objectContaining({handle:'someuser'})]);
 	expect(provider.resolve).toHaveBeenCalledWith('someuser', 'synthetic-token');
 });
-test('a duplicate verified handle retains its original identity without lookup', async () => {
+test('a duplicate handle is verified without retaining the current channel identity', async () => {
 	await seedChannel('UC1');
-	await testDb().db.insert(channelAllowedHandles).values({ channelId: 'UC1', handle: 'someuser', resolvedChannelId: 'original-holder' });
+	await testDb().db.insert(channelAllowedHandles).values({ channelId: 'UC1', handle: 'someuser' });
 	expect(await addHandle('UC1', 'someuser')).toEqual({ ok: true });
-	expect((await handleRows())[0].resolvedChannelId).toBe('original-holder');
-	expect(provider.resolve).not.toHaveBeenCalled();
+	expect((await handleRows())[0]).not.toHaveProperty('resolvedChannelId');
+	expect(provider.resolve).toHaveBeenCalledWith('someuser', 'synthetic-token');
 });
 
 test.each(['refresh', 'lookup', 'decrypt'])('verification %s failures are server-only and cannot alter protection', async (boundary) => {
@@ -379,9 +385,9 @@ test.each(['refresh', 'lookup', 'decrypt'])('verification %s failures are server
 			await testDb().db.update(channels).set({ refreshTokenEnc: 'invalid-synthetic-ciphertext' });
 		}
 		const result = await addHandle('UC1', 'someuser');
-		expect(result).toMatchObject({ status: 400, data: { error: 'YouTube handle verification is unavailable; protection was not changed' } });
+		expect(result).toMatchObject({ status: 503, data: { error: 'Protected handle configuration is unavailable; protection was not changed' } });
 		expect(JSON.stringify(result)).not.toContain('synthetic-sensitive-marker');
-		expect(log).toHaveBeenCalledWith('protected handle verification failed', 'UC1', expect.any(Error));
+		expect(log).toHaveBeenCalledWith('protected handle configuration failed', 'UC1', expect.any(Error));
 		expect(await handleRows()).toEqual(before);
 	} finally { log.mockRestore(); }
 });
@@ -404,6 +410,42 @@ test.each(['disconnect', 'reconnect', 'transfer'])('a %s during verification can
 		if (change === 'transfer') await testDb().db.update(channels).set({ orgId: 'other-org' });
 		return 'verified-author';
 	});
-	expect(await addHandle('UC1', 'someuser')).toMatchObject({ status: 400, data: { error: 'channel connection changed during handle verification' } });
+	expect(await addHandle('UC1', 'someuser')).toMatchObject({ status: 409, data: { error: 'channel connection changed during handle verification' } });
+	expect(await handleRows()).toEqual([]);
+});
+
+test('database failures during handle addition return a generic service error and log diagnostics', async () => {
+	await seedChannel('UC1');
+	const diagnostic = new Error('synthetic-private-database-diagnostic');
+	const transaction = vi.spyOn(testDb().db, 'transaction').mockRejectedValueOnce(diagnostic);
+	const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+	try {
+		const result = await addHandle('UC1', 'someuser');
+		expect(result).toMatchObject({status:503, data:{error:'Protected handle configuration is unavailable; protection was not changed'}});
+		expect(JSON.stringify(result)).not.toContain(diagnostic.message);
+		expect(log).toHaveBeenCalledWith('protected handle configuration failed', 'UC1', diagnostic);
+		expect(await handleRows()).toEqual([]);
+	} finally { transaction.mockRestore(); log.mockRestore(); }
+});
+
+test('database failures during handle removal return a generic service error and preserve configuration', async () => {
+	await seedChannel('UC1');
+	const id = await seedHandle('UC1', 'someuser');
+	const diagnostic = new Error('synthetic-private-removal-diagnostic');
+	const remove = vi.spyOn(testDb().db, 'delete').mockImplementationOnce(() => {throw diagnostic;});
+	const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+	try {
+		const result = await removeHandle('UC1', String(id));
+		expect(result).toMatchObject({status:503, data:{error:'Protected handle configuration is unavailable; protection was not changed'}});
+		expect(JSON.stringify(result)).not.toContain(diagnostic.message);
+		expect(log).toHaveBeenCalledWith('protected handle configuration failed', 'UC1', diagnostic);
+		expect(await handleRows()).toHaveLength(1);
+	} finally {remove.mockRestore(); log.mockRestore();}
+});
+
+test('an expired refresh grant gives a safe reconnect instruction without changing protection', async () => {
+	await seedChannel('UC1');
+	provider.refresh.mockRejectedValueOnce(new GoogleGrantExpiredError('synthetic-private-detail'));
+	expect(await addHandle('UC1','someuser')).toMatchObject({status:401,data:{error:'YouTube access expired — reconnect the channel; protection was not changed'}});
 	expect(await handleRows()).toEqual([]);
 });

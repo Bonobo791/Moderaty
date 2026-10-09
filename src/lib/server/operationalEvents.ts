@@ -83,13 +83,26 @@ function safeRelease(value: unknown): string | null {
 }
 
 // Only fixed built-in names and an opaque grouping key enter the log. Neither
-// provider messages, custom names, causes nor stack text are serialized.
+// provider messages, custom names and stack text are serialized. Causes retain
+// only fixed built-in classes, known failure codes and validated HTTP statuses.
+const DIAGNOSTIC_CODES = new Set(['SQLITE_BUSY', 'SQLITE_LOCKED', 'SQLITE_ERROR', 'SQLITE_CONSTRAINT', 'SQLITE_READONLY', 'SQLITE_CORRUPT', 'SQLITE_CANTOPEN', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET']);
 function safeDiagnostics(error: unknown) {
 	let errorKind = 'unknown';
 	let errorFingerprint: string | null = null;
+	const errorCauses: {kind:string; code:string|null; httpStatus:number|null}[] = [];
 	try {
 		const classes = [TypeError, RangeError, ReferenceError, SyntaxError, URIError, EvalError, AggregateError, Error];
 		errorKind = classes.find((kind) => error instanceof kind)?.name ?? 'unknown';
+		let current = error;
+		const seen = new Set<unknown>();
+		while (current instanceof Error && errorCauses.length < 5 && !seen.has(current)) {
+			seen.add(current);
+			const {code, httpStatus, cause} = current as Error & {code?:unknown; httpStatus?:unknown};
+			errorCauses.push({kind:classes.find(kind => current instanceof kind)?.name ?? 'Error',
+				code:typeof code === 'string' && DIAGNOSTIC_CODES.has(code) ? code : null,
+				httpStatus:typeof httpStatus === 'number' && Number.isInteger(httpStatus) && httpStatus >= 400 && httpStatus <= 599 ? httpStatus : null});
+			current = cause;
+		}
 		const stack = error instanceof Error ? error.stack : undefined;
 		if (typeof stack === 'string' && stack.length <= 65_536) {
 			const frames = stack.split('\n').filter((line) => line.trimStart().startsWith('at ')).slice(0, 8).join('\n');
@@ -98,7 +111,7 @@ function safeDiagnostics(error: unknown) {
 	} catch {
 		// Hostile accessors/proxies must not prevent the original event.
 	}
-	return { errorKind, errorFingerprint };
+	return { errorKind, errorFingerprint, errorCauses };
 }
 
 function validatedEvent(event: OperationalEvent) {

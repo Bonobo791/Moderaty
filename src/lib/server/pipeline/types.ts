@@ -37,6 +37,8 @@ export interface ChannelRunResult {
 	 * mid-run (no verdict — the Paused badge covers it). Absent on complete
 	 * runs and on results produced before this field existed. */
 	stoppedReason?: 'deadline' | 'deactivated';
+	/** Audit enrichment failed; moderation still completed without some handles. */
+	handleLookupError?: boolean;
 	/** Window-mode continuation: token for the next drain page (null when the
 	 * window is exhausted) and whether the drain reached its boundary. Absent
 	 * outside window mode. */

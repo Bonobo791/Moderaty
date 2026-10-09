@@ -505,6 +505,20 @@
       "when": 1791550883462,
       "tag": "0071_protected_channel_identity",
       "breakpoints": true
+    },
+    {
+      "idx": 72,
+      "version": "6",
+      "when": 1791562092867,
+      "tag": "0072_protected_handles_memory_only",
+      "breakpoints": true
+    },
+    {
+      "idx": 73,
+      "version": "6",
+      "when": 1791570822667,
+      "tag": "0073_protected_handles_rollout_compatibility",
+      "breakpoints": true
     }
   ]
 }

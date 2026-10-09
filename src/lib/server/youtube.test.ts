@@ -728,7 +728,7 @@ test.each([{}, { items: [] }, { items: [{ id: '' }] }, { items: [{ id: 1 }] }, {
 });
 test('handle lookup rejects provider failure', async () => {
 	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status: 403 })));
-	await expect(resolveHandleChannelId('protected_handle', 'token')).rejects.toThrow('lookup unavailable');
+	await expect(resolveHandleChannelId('protected_handle', 'token')).rejects.toThrow('YouTube handle lookup failed: HTTP 403');
 });
 
 test.each([{ items: [] }])('handle lookup distinguishes zero results from malformed data: %j', async (payload) => {
@@ -741,4 +741,9 @@ test.each([{}, { items: null }, null, [], { items: 0 }, { items: {} }, { items: 
 	const error = await resolveHandleChannelId('unknown_handle', 'token').catch(error => error);
 	expect(error).toBeInstanceOf(Error);
 	expect(error).not.toBeInstanceOf(HandleNotFoundError);
+});
+
+test('a structured expired refresh grant is distinguishable from other provider failures', async () => {
+	vi.stubGlobal('fetch', async () => Response.json({error:'invalid_grant',error_description:'synthetic-private-detail'},{status:400}));
+	await expect(refreshAccessToken('synthetic-refresh')).rejects.toMatchObject({name:'GoogleGrantExpiredError'});
 });

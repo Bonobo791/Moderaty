@@ -446,6 +446,9 @@ const mocks = vi.hoisted(() => {
 		refreshAccessToken: vi.fn(),
 		fetchNewComments: vi.fn(),
 		fetchVideoMetadata: vi.fn(),
+		fetchAuthorHandles: vi.fn(),
+		resolveHandleChannelId: vi.fn(),
+		fetchCommentAuthorIds: vi.fn(),
 		setModerationStatus: vi.fn(),
 		deleteComment: vi.fn(),
 		scoreComment: vi.fn(),
@@ -494,6 +497,9 @@ vi.mock('$lib/server/youtube', async (importOriginal) => ({
 	refreshAccessToken: mocks.refreshAccessToken,
 	fetchNewComments: mocks.fetchNewComments,
 	fetchVideoMetadata: mocks.fetchVideoMetadata,
+	fetchAuthorHandles: mocks.fetchAuthorHandles,
+	resolveHandleChannelId: mocks.resolveHandleChannelId,
+	fetchCommentAuthorIds: mocks.fetchCommentAuthorIds,
 	setModerationStatus: mocks.setModerationStatus,
 	deleteComment: mocks.deleteComment
 }));
@@ -648,7 +654,7 @@ export function runWindowPage({
 }
 
 export function protectHandle(handle: string) {
-	mocks.state.handleRows = [{ id: 1, channelId: 'channel', handle, resolvedChannelId: 'author', createdAt: '2026-01-01T00:00:00.000Z' }];
+	mocks.state.handleRows = [{ id: 1, channelId: 'channel', handle, createdAt: '2026-01-01T00:00:00.000Z' }];
 }
 
 export function expectActionState(state: string) {
@@ -701,6 +707,9 @@ export function resetPipelineMocks() {
 		mocks.refreshAccessToken,
 		mocks.fetchNewComments,
 		mocks.fetchVideoMetadata,
+		mocks.fetchAuthorHandles,
+		mocks.resolveHandleChannelId,
+		mocks.fetchCommentAuthorIds,
 		mocks.setModerationStatus,
 		mocks.deleteComment,
 		mocks.scoreComment,
@@ -751,6 +760,12 @@ export function resetPipelineMocks() {
 	mocks.decrypt.mockReturnValue('refresh-token');
 	mocks.assertBeforeDeadline.mockImplementation(() => undefined);
 	mocks.refreshAccessToken.mockResolvedValue('access-token');
+	mocks.resolveHandleChannelId.mockResolvedValue('author');
+	mocks.fetchAuthorHandles.mockResolvedValue(new Map());
+	mocks.fetchCommentAuthorIds.mockImplementation(async (ids: string[]) => {
+		const page = await mocks.fetchNewComments.mock.results.at(-1)?.value;
+		return new Map(ids.map(id => [id, page?.comments.find((comment: NewComment) => comment.id === id)?.authorChannelId ?? 'author']));
+	});
 	mocks.fetchNewComments.mockResolvedValue({
 		comments: [newComment()],
 		nextPageToken: null,

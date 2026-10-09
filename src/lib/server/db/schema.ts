@@ -363,11 +363,10 @@ export const channelAllowedHandles = sqliteTable('channel_allowed_handles', {
 	channelId: text('channel_id').notNull(),
 	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	handle: text('handle').notNull(), // normalized lowercase commenter handle
-	// Owner-configured protection identity, never copied to comment rows.
-	resolvedChannelId: text('resolved_channel_id'),
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 }, (table) => [
-	index('channel_allowed_handles_channel_idx').on(table.channelId)
+	index('channel_allowed_handles_channel_idx').on(table.channelId),
+	uniqueIndex('channel_allowed_handles_channel_handle_unique').on(table.channelId, table.handle)
 ]);
 
 export const comments = sqliteTable('comments', {

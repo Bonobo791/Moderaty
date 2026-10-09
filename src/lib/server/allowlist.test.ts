@@ -88,6 +88,12 @@ test('addHandle throws loudly at the per-channel maximum', async () => {
 	expect(await rows()).toHaveLength(MAX_HANDLES_PER_CHANNEL);
 });
 
+test('duplicates remain idempotent at capacity without a resolver', async () => {
+	await testDb().db.insert(channelAllowedHandles).values(Array.from({length: 100}, (_, index) => ({channelId: 'UC1', handle: `handle-${index}`})));
+	expect(await addHandle('UC1', '@HANDLE-0')).toMatchObject({handle: 'handle-0'});
+	expect(await rows()).toHaveLength(100);
+});
+
 test('the same handle can be protected on two different channels', async () => {
 	await addHandle('UC1', 'someuser');
 	await addHandle('UC2', '@SomeUser');
@@ -141,12 +147,13 @@ test('loadHandleSet returns this channel normalized handles as a Set', async () 
 	expect(set).toEqual(new Set(['someuser', 'other.user']));
 });
 
-test('an explicit resolution at capacity updates the legacy row without adding one', async () => {
+test('verification at capacity preserves the entered handle without storing identity', async () => {
 	await testDb().db.insert(channelAllowedHandles).values(Array.from({ length: 100 }, (_, index) => ({ channelId: 'UC1', handle: `handle-${index}` })));
 	await addHandle('UC1', 'handle-0', async () => 'verified-author');
 	const stored = await rows();
 	expect(stored).toHaveLength(100);
-	expect(stored.find(row => row.handle === 'handle-0')?.resolvedChannelId).toBe('verified-author');
+	expect(stored.find(row => row.handle === 'handle-0')).not.toHaveProperty('resolvedChannelId');
+	expect(JSON.stringify(stored)).not.toContain('verified-author');
 });
 
 test('failed explicit resolution retains the unresolved row and original configuration', async () => {
@@ -156,13 +163,14 @@ test('failed explicit resolution retains the unresolved row and original configu
 	expect(await rows()).toEqual(before);
 });
 
-test('a concurrent legacy resolution cannot rebind an already verified identity', async () => {
-	const original = await addHandle('UC1', 'legacy-handle');
+test('duplicate verification discards a different current holder without rebinding stored data', async () => {
+	const original = await addHandle('UC1', 'legacy-handle', async () => 'first-holder');
 	await addHandle('UC1', 'legacy-handle', async () => {
-		await testDb().db.update(channelAllowedHandles).set({ resolvedChannelId: 'first-holder' });
+		await addHandle('UC1', 'legacy-handle', async () => 'concurrent-holder');
 		return 'later-holder';
 	});
-	expect(await rows()).toEqual([expect.objectContaining({ id: original.id, resolvedChannelId: 'first-holder' })]);
+	expect(await rows()).toEqual([original]);
+	expect(original).not.toHaveProperty('resolvedChannelId');
 });
 
 test('removal during external resolution cannot report an added protection', async () => {

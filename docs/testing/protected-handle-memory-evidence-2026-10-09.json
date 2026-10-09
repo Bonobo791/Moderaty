@@ -1,0 +1,140 @@
+{
+  "result": {
+    "fetched": 2,
+    "acted": 1,
+    "queued": 0,
+    "partial": false,
+    "skipped": false,
+    "dryRun": false
+  },
+  "handles": [
+    {
+      "id": 1,
+      "channelId": "UCsynthetic_moderaty_owner",
+      "handle": "protected_creator",
+      "createdAt": "2026-10-09T16:25:08.562Z"
+    }
+  ],
+  "comments": [
+    {
+      "id": "protected-comment",
+      "channelId": "UCsynthetic_moderaty_owner",
+      "authorChannelId": null,
+      "authorName": null,
+      "text": "synthetic-ban-trigger",
+      "publishedAt": "2026-10-09T16:25:10.075Z",
+      "status": "approved",
+      "restoreIntentId": null,
+      "humanDispatchToken": null,
+      "humanDispatchState": null,
+      "decidedBy": "allowlist",
+      "matchedRuleId": null,
+      "aiScore": null,
+      "feedbackDigestedAt": null,
+      "scanId": null,
+      "createdAt": "2026-10-09T16:25:10.083Z"
+    },
+    {
+      "id": "control-comment",
+      "channelId": "UCsynthetic_moderaty_owner",
+      "authorChannelId": null,
+      "authorName": null,
+      "text": "synthetic-ban-trigger",
+      "publishedAt": "2026-10-09T16:25:10.075Z",
+      "status": "rejected",
+      "restoreIntentId": null,
+      "humanDispatchToken": null,
+      "humanDispatchState": null,
+      "decidedBy": "rule",
+      "matchedRuleId": 1,
+      "aiScore": null,
+      "feedbackDigestedAt": null,
+      "scanId": null,
+      "createdAt": "2026-10-09T16:25:10.083Z"
+    }
+  ],
+  "actions": [
+    {
+      "commentId": "control-comment",
+      "channelId": "UCsynthetic_moderaty_owner",
+      "action": "ban",
+      "reason": "rule #1 (keyword: synthetic-ban-trigger)",
+      "state": "completed",
+      "lastAttemptAt": "2026-10-09T16:25:10.093Z",
+      "lastManualRetryAt": null,
+      "authorHandle": "unprotected_creator",
+      "createdAt": "2026-10-09T16:25:10.084Z"
+    }
+  ],
+  "audits": [
+    {
+      "id": 1,
+      "channelId": "UCsynthetic_moderaty_owner",
+      "commentId": "protected-comment",
+      "action": "approve",
+      "reason": "protected handle",
+      "actor": "system",
+      "text": null,
+      "authorHandle": "protected_creator",
+      "createdAt": "2026-10-09T16:25:10.085Z"
+    },
+    {
+      "id": 2,
+      "channelId": "UCsynthetic_moderaty_owner",
+      "commentId": "control-comment",
+      "action": "ban",
+      "reason": "rule #1 (keyword: synthetic-ban-trigger)",
+      "actor": "system",
+      "text": null,
+      "authorHandle": "unprotected_creator",
+      "createdAt": "2026-10-09T16:25:10.098Z"
+    }
+  ],
+  "requests": [
+    {
+      "url": "https://oauth2.googleapis.com/token",
+      "method": "POST"
+    },
+    {
+      "url": "https://www.googleapis.com/youtube/v3/channels?part=id&forHandle=protected_creator",
+      "method": "GET"
+    },
+    {
+      "url": "https://oauth2.googleapis.com/token",
+      "method": "POST"
+    },
+    {
+      "url": "https://www.googleapis.com/youtube/v3/channels?part=id&forHandle=protected_creator",
+      "method": "GET"
+    },
+    {
+      "url": "https://oauth2.googleapis.com/token",
+      "method": "POST"
+    },
+    {
+      "url": "https://www.googleapis.com/youtube/v3/commentThreads?part=snippet&allThreadsRelatedToChannelId=UCsynthetic_moderaty_owner&order=time&maxResults=100&textFormat=plainText",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.googleapis.com/youtube/v3/channels?part=id&forHandle=protected_creator",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.googleapis.com/youtube/v3/channels?part=snippet&id=UCsynthetic_protected_author%2CUCsynthetic_control_author&maxResults=50",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.googleapis.com/youtube/v3/channels?part=id&forHandle=protected_creator",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.googleapis.com/youtube/v3/comments?part=snippet&id=control-comment&maxResults=50",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.googleapis.com/youtube/v3/comments/setModerationStatus?id=control-comment&moderationStatus=rejected&banAuthor=true",
+      "method": "POST"
+    }
+  ],
+  "blockedRequests": []
+}

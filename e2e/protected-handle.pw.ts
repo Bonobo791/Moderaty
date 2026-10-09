@@ -20,7 +20,8 @@ test('a UI-added protected handle survives reload and prevents a ban despite a d
 	await page.reload();
 	await expect(page.getByRole('button', { name: 'Remove protected handle protected_creator', exact: true })).toBeVisible();
 	await expect(page.locator('code').filter({ hasText: /^@protected_creator$/ })).toBeVisible();
-	expect((await app.state()).handles).toEqual([expect.objectContaining({ channelId: app.channelId, handle: 'protected_creator', resolvedChannelId: protectedAuthorId })]);
+	expect((await app.state()).handles[0]).not.toHaveProperty('resolvedChannelId');
+	expect((await app.state()).handles).toEqual([expect.objectContaining({ channelId: app.channelId, handle: 'protected_creator' })]);
 	const screenshotPath = testInfo.outputPath('protected-handle-persisted.png');
 	await page.screenshot({ path: screenshotPath, fullPage: true });
 	await testInfo.attach('protected-handle-after-reload', { path: screenshotPath, contentType: 'image/png' });
@@ -42,7 +43,7 @@ test('a UI-added protected handle survives reload and prevents a ban despite a d
 	// enforcement and provider serialization ran, before testing an absence.
 	expect(observed.comments.find(row => row.id === 'control-comment')).toMatchObject({ status: 'rejected', decidedBy: 'rule' });
 	expect(observed.actions.find(row => row.commentId === 'control-comment')).toMatchObject({ action: 'ban', state: 'completed' });
-	expect(observed.audits).toContainEqual(expect.objectContaining({ commentId: 'control-comment', action: 'ban' }));
+	expect(observed.audits).toContainEqual(expect.objectContaining({ commentId: 'control-comment', action: 'ban', authorHandle:'unprotected_creator' }));
 	expect(bannedIds).toContain('control-comment');
 	expect(observed.result).toMatchObject({ fetched: 2, queued: 0, partial: false, skipped: false, dryRun: false });
 	expect(observed.comments.every(row => row.authorName === null && row.authorChannelId === null)).toBe(true);

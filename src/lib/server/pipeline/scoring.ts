@@ -1,5 +1,5 @@
 import { and, eq, inArray } from 'drizzle-orm';
-import { loadProtectedIdentities } from '$lib/server/allowlist';
+import { loadProtectedIdentities, loadProtectedAuthors } from '$lib/server/allowlist';
 import { getCredits, orgIsMetered } from '$lib/server/billing/ledger';
 import { db } from '$lib/server/db';
 import { comments, rules } from '$lib/server/db/schema';
@@ -7,7 +7,7 @@ import { DeadlineExceededError } from '$lib/server/http';
 import { prepareRules } from '$lib/server/rules';
 import type { ToneProtections } from '$lib/server/tone';
 import { TONE_LEVEL_OMNI_AND_TONE } from '$lib/toneLevels';
-import { fetchVideoMetadata, type CommentPage } from '$lib/server/youtube';
+import { fetchVideoMetadata, fetchAuthorHandles, resolveHandleChannelId, type CommentPage } from '$lib/server/youtube';
 import { decide, metadataUnavailable } from './decisions';
 import { hasHumanClaim } from './human-claims';
 import type { AiBudget, Decision, DecisionBatchOptions, ScoreOutcome } from './types';
@@ -58,6 +58,25 @@ async function loadRescanExclusions(
 	};
 }
 
+async function loadAuthorHandles(
+	newComments: CommentPage['comments'],
+	accessToken: string,
+	deadline: number | undefined
+): Promise<{ handles: Map<string, string>; handleLookupError: boolean }> {
+	let handles = new Map<string, string>();
+	let handleLookupError = false;
+	try {
+		const lookup = await fetchAuthorHandles(newComments.map(comment => comment.authorChannelId), accessToken, deadline);
+		handles = lookup;
+		handleLookupError = Boolean(lookup.skippedItems);
+	} catch (error) {
+		if (error instanceof DeadlineExceededError) throw error;
+		console.warn('YouTube author-handle lookup failed; continuing without audit handles', error);
+		handleLookupError = true;
+	}
+	return { handles, handleLookupError };
+}
+
 export async function prepareDecisionBatch(
 	channelId: string,
 	page: CommentPage,
@@ -69,6 +88,7 @@ export async function prepareDecisionBatch(
 	aiBudget: AiBudget;
 	videoContext: Awaited<ReturnType<typeof fetchVideoMetadata>> | null;
 	metadataError: unknown;
+	handleLookupError: boolean;
 	protectedIds: string[];
 }> {
 // Credits gate AI scoring for live runs only (I8: a dry run changes nothing
@@ -114,8 +134,6 @@ const storedIds =
 // Stryker restore ArrayDeclaration
 const existingIds = new Set(storedIds);
 const rulesForChannel = prepareRules(await db.select().from(rules).where(eq(rules.channelId, channelId)).all());
-// One allowlist read per run; decide() checks it before any rule or scoring.
-const allowlist = await loadProtectedIdentities(channelId);
 // Dedupe three ways: against already-stored comments, within this batch,
 // and against comments this scan already staged (the scan_id marker). The
 // last keeps a parked rescan page from re-scoring finished work every tick;
@@ -125,11 +143,17 @@ const allowlist = await loadProtectedIdentities(channelId);
 // KEY, failing the entire staging transaction (I1: one bad item never
 // aborts the batch).
 const seen = new Set<string>();
-const newComments = page.comments.filter((comment) => {
+const freshComments = page.comments.filter((comment) => {
 	if (existingIds.has(comment.id) || seen.has(comment.id) || stagedIds.has(comment.id) || protectedIdSet.has(comment.id)) return false;
 	seen.add(comment.id);
 	return true;
 });
+// Idle/already-staged pages need configuration only. Pending destructive
+// actions independently resolve protection in enforcement when necessary.
+const { handles, handleLookupError } = await loadAuthorHandles(freshComments, options.accessToken, options.deadline);
+const allowlist = await loadProtectedAuthors(channelId, db, freshComments.map(comment => comment.authorChannelId), handles,
+	handle => resolveHandleChannelId(handle, options.accessToken, options.deadline));
+const newComments = freshComments.map(comment => ({ ...comment, authorHandle: handles.get(comment.authorChannelId) ?? null }));
 // A ticked protection flag forces the tone pass on even below
 // TONE_LEVEL_OMNI_AND_TONE: the channel owner asked for heightened scrutiny,
 // so the checkbox must never be a silent no-op.
@@ -141,7 +165,7 @@ const { videoContext, metadataError } = await loadVideoContext(
 	options.accessToken,
 	options.deadline
 );
-return { newComments, rulesForChannel, allowlist, aiBudget, videoContext, metadataError, protectedIds };
+return { newComments, rulesForChannel, allowlist, aiBudget, videoContext, metadataError, handleLookupError, protectedIds };
 }
 export async function scoreComments(
 	newComments: Array<CommentPage['comments'][number]>,
@@ -218,7 +242,7 @@ export async function decideNewComments(
 		scanStamp,
 		consumeCredits
 	}: DecisionBatchOptions
-): Promise<{ decisions: Decision[]; failures: string[]; deferred: number; protectedIds: string[] }> {
+): Promise<{ decisions: Decision[]; failures: string[]; deferred: number; protectedIds: string[]; handleLookupError: boolean; protection: Awaited<ReturnType<typeof loadProtectedIdentities>> }> {
 	const batch = await prepareDecisionBatch(channelId, page, {
 		accessToken,
 		toneLevel,
@@ -240,5 +264,5 @@ export async function decideNewComments(
 		protections,
 		openAiKey
 	});
-	return { ...foldDecisions(settled), protectedIds: batch.protectedIds };
+	return { ...foldDecisions(settled), protectedIds: batch.protectedIds, handleLookupError: batch.handleLookupError, protection: batch.allowlist };
 }

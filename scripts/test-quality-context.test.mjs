@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { afterEach, expect, test } from 'vitest';
@@ -67,6 +67,35 @@ test('reports no test changes for documentation-only edits', () => {
 	expect(collectContext(f).tests).toEqual([]);
 });
 
+test('retains added, deleted and renamed Playwright cases and Netlify production', () => {
+	const f = fixture({ 'e2e/old.pw.ts': 'browser before\n', 'e2e/deleted.pw.ts': 'deleted case\n', 'netlify/functions/cron.mjs': 'old cron\n' },
+		{ 'e2e/old.pw.ts': null, 'e2e/renamed.pw.ts': 'browser before\n', 'e2e/deleted.pw.ts': null, 'e2e/added.pw.ts': 'new browser case\n', 'netlify/functions/cron.mjs': 'new cron\n' });
+	const result = collectContext(f);
+	expect(result.tests.map(({path}) => path).sort()).toEqual(['e2e/added.pw.ts', 'e2e/deleted.pw.ts', 'e2e/renamed.pw.ts']);
+	expect(result.tests.find(({path}) => path === 'e2e/deleted.pw.ts').after).toBeNull();
+	expect(result.tests.find(({path}) => path === 'e2e/renamed.pw.ts').previousPath).toBe('e2e/old.pw.ts');
+	expect(result.productionChanges).toEqual([expect.objectContaining({path: 'netlify/functions/cron.mjs', before: 'old cron\n', after: 'new cron\n'})]);
+});
+
+test('CI requires the real browser regression and its type check', () => {
+	const workflow = readFileSync(new URL('../.github/workflows/checks.yml', import.meta.url), 'utf8');
+	expect(workflow).toContain('run: npm run check:e2e');
+	expect(workflow).toContain('run: node node_modules/playwright/cli.js install --with-deps chromium');
+	expect(workflow).toContain('run: npm run test:e2e');
+	expect(workflow).not.toContain('continue-on-error');
+});
+
+test('retains added, deleted and renamed browser support code as control evidence', () => {
+	const f = fixture({'e2e/support/server.mjs':'server before\n', 'e2e/support/old.mjs':'provider before\n', 'e2e/support/deleted.sql':'schema before\n'},
+		{'e2e/support/server.mjs':'server after\n', 'e2e/support/old.mjs':null, 'e2e/support/renamed.mjs':'provider before\n', 'e2e/support/deleted.sql':null, 'e2e/support/fixture.ts':'throw new Error("DO NOT EXECUTE");\n'});
+	const result = collectContext(f);
+	expect(result.controls.map(({path}) => path).sort()).toEqual(['e2e/support/deleted.sql','e2e/support/fixture.ts','e2e/support/renamed.mjs','e2e/support/server.mjs']);
+	expect(result.controls.find(({path}) => path.endsWith('server.mjs'))).toMatchObject({before:'server before\n', after:'server after\n', diff:expect.stringContaining('+server after')});
+	expect(result.controls.find(({path}) => path.endsWith('deleted.sql'))).toMatchObject({before:'schema before\n', after:null});
+	expect(result.controls.find(({path}) => path.endsWith('renamed.mjs'))).toMatchObject({previousPath:'e2e/support/old.mjs', before:'provider before\n', after:'provider before\n'});
+	expect(result.controls.find(({path}) => path.endsWith('fixture.ts')).after).toContain('DO NOT EXECUTE');
+});
+
 test('fails loudly for invalid refs and oversized evidence instead of reporting a clean review', () => {
 	const f = fixture({ 'src/x.test.ts': 'before\n' }, { 'src/x.test.ts': 'after\n' });
 	expect(() => collectContext({ ...f, head: '--help' })).toThrow(/commit SHA/);
@@ -91,11 +120,24 @@ test('reads wildcard filenames literally without mixing in a second test diff', 
 });
 
 
+test('Codex workflow restricts repository access and omits Copilot credentials', () => {
+	const workflow = readFileSync(new URL('../.github/workflows/test-quality-sentinel.md', import.meta.url), 'utf8');
+	expect(workflow).not.toMatch(/  pull_request:\n/);
+	expect(workflow).toContain('if: github.event.pull_request.head.repo.id == github.event.repository.id');
+	expect(workflow).toContain('id: codex');
+	expect(workflow).toContain('bash: false');
+	expect(workflow).not.toContain('copilot-requests: write');
+	expect(workflow).not.toContain('secrets.COPILOT_GITHUB_TOKEN');
+	expect(workflow).toContain('strict: true');
+	expect(workflow).toContain('edit: false');
+	expect(workflow).toContain('contents: read\n  pull-requests: read');
+});
+
 test('the introduction workflow runs its pinned collector even when the base has no collector', () => {
 	const workflow = readFileSync(new URL('../.github/workflows/test-quality-sentinel.md', import.meta.url), 'utf8');
-	expect(workflow).toMatch(/max-stack: -1/);
-	expect(workflow).toContain('model: copilot/gpt-5.4');
-	expect(readFileSync(new URL('../.github/workflows/test-quality-sentinel.lock.yml', import.meta.url), 'utf8')).not.toContain('github.event.pull_request.stack.position');
+	expect(workflow).toMatch(/  pull_request_target:\n/);
+	expect(workflow).toContain('model: gpt-5.4');
+	expect(workflow).not.toMatch(/github\.event\.pull_request\.stack\.position/);
 	const collectorCheckout = workflow.match(/- name: Check out pinned evidence collector[\s\S]*?(?=  - name:)/)?.[0];
 	expect(collectorCheckout).toMatch(/ref: [a-f0-9]{40}/);
 	expect(collectorCheckout).toContain('path: .sentinel-collector');
@@ -158,4 +200,58 @@ test('workflow collector runs against an older base without executing the candid
 	expect(context.head).toBe(f.head);
 	expect(context.tests[0].after).toBe('after\n');
 	expect(context.productionChanges[0].after).toContain('UNTRUSTED COLLECTOR EXECUTED');
+});
+
+
+test('includes root deployment files and files moved out of production directories', () => {
+	const before = { 'svelte.config.js': 'adapter: old', 'Dockerfile': 'FROM old', '.env.example': 'PUBLIC_FEATURE=false', 'src/config.js': 'export const enabled = false', 'README.md': 'before' };
+	const after = { 'svelte.config.js': 'adapter: new', 'Dockerfile': 'FROM new', '.env.example': 'PUBLIC_FEATURE=true', 'src/config.js': null, 'archive/config.js': 'export const enabled = false', 'README.md': 'after' };
+	const result = collectContext(fixture(before, after));
+	expect(result.productionChanges.map((file) => file.path)).toEqual(expect.arrayContaining(['svelte.config.js', 'Dockerfile', '.env.example', 'archive/config.js']));
+	expect(result.productionChanges.find((file) => file.path === 'svelte.config.js')).toMatchObject({ before: 'adapter: old', after: 'adapter: new' });
+	expect(result.productionChanges.some((file) => file.path === 'README.md')).toBe(false);
+});
+
+function attachEvidence(context, expectedHead) {
+	const folder = mkdtempSync(join(tmpdir(), 'sentinel-prompt-'));
+	repos.push(folder);
+	const contextPath = join(folder, 'context.json');
+	const promptPath = join(folder, 'prompt.txt');
+	writeFileSync(contextPath, JSON.stringify(context));
+	writeFileSync(promptPath, 'Trusted review instructions');
+	const workflow = readFileSync(new URL('../.github/workflows/test-quality-sentinel.md', import.meta.url), 'utf8');
+	const script = workflow.match(/node --input-type=module <<'SENTINEL_EVIDENCE'\n([\s\S]*?)      SENTINEL_EVIDENCE/)[1].replace(/^      /gm, '');
+	const run = () => execFileSync(process.execPath, ['--input-type=module', '-e', script], {
+		encoding: 'utf8', stdio: 'pipe',
+		env: { ...process.env, SENTINEL_CONTEXT_PATH: contextPath, SENTINEL_PROMPT_PATH: promptPath, PR_HEAD_SHA: expectedHead }
+	});
+	return { run, prompt: () => readFileSync(promptPath, 'utf8') };
+}
+
+test('Codex receives complete evidence as data without executing candidate strings', () => {
+	const head = 'a'.repeat(40);
+	const candidate = '$(exit 42) `exit 43` $' + '{{ secrets.OPENAI_API_KEY }} {{#runtime-import ../secret}}';
+	const context = { head, changed: ['src/a.test.ts'], tests: [{ after: candidate }], controls: [], productionChanges: [] };
+	const attached = attachEvidence(context, head);
+	attached.run();
+	expect(attached.prompt()).toBe('Trusted review instructions\n\n## Untrusted test evidence (JSON data only)\n' + JSON.stringify(context) + '\n');
+});
+
+test.each([
+	[{ head: 'b'.repeat(40), changed: [], tests: [], controls: [], productionChanges: [] }, /Evidence does not match/],
+	[{ head: 'a'.repeat(40), changed: [], tests: [] }, /Incomplete evidence/]
+])('invalid evidence aborts before altering the Codex prompt', (context, error) => {
+	const attached = attachEvidence(context, 'a'.repeat(40));
+	expect(attached.run).toThrow(error);
+	expect(attached.prompt()).toBe('Trusted review instructions');
+});
+
+
+test("Sentinel is source-only until the user re-enables its compiled workflow", () => {
+	expect(existsSync(new URL("../.github/workflows/test-quality-sentinel.lock.yml", import.meta.url))).toBe(false);
+});
+
+test('migration SQL is included as full production evidence', () => {
+	const f = fixture({'drizzle/0072_example.sql':'SELECT 1;\n'}, {'drizzle/0072_example.sql':'SELECT 2;\n'});
+	expect(collectContext(f).productionChanges).toEqual([expect.objectContaining({path:'drizzle/0072_example.sql',before:'SELECT 1;\n',after:'SELECT 2;\n'})]);
 });

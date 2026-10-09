@@ -4,13 +4,17 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const SHA = /^[a-f0-9]{40}$/;
-const TEST = /\.(test|spec)\.[cm]?[jt]sx?$/;
-const CONTROL_NAMES = ['package.json', 'package-lock.json'];
+const TEST = /\.(test|spec|pw)\.[cm]?[jt]sx?$/;
+const CONTROL_NAMES = new Set(['package.json', 'package-lock.json']);
 const CONTROL_PREFIXES = ['vitest', 'vite.config.', 'playwright.config.', 'stryker', 'tsconfig'];
 function isControl(path) {
 	const filename = path.split('/').at(-1);
-	return path.startsWith('.github/workflows/') || CONTROL_NAMES.includes(filename) ||
+	return path.startsWith('.github/workflows/') || (path.startsWith('e2e/') && !TEST.test(path)) || CONTROL_NAMES.has(filename) ||
 		CONTROL_PREFIXES.some((prefix) => filename.startsWith(prefix));
+}
+
+function isProduction(path) {
+	return /^(src|scripts|netlify|drizzle)\//.test(path) || (!path.includes('/') && !/\.md$/i.test(path));
 }
 
 // This collects review evidence, not a quality verdict. Candidate files are data:
@@ -43,13 +47,14 @@ export function collectContext({ repo = process.cwd(), base, head, maxBytes = 2_
 		diff: git('diff', '--no-ext-diff', '--no-textconv', mergeBase, head, '--', previousPath, path)
 	});
 	const tests = changed.filter((file) => TEST.test(file.path) || TEST.test(file.previousPath)).map((file) => {
-		const companions = [...new Set([file.path, file.previousPath].map((path) => path.replace(/\.(test|spec)(\.[cm]?[jt]sx?)$/, '$2')))];
+		const companions = [...new Set([file.path, file.previousPath].map((path) => path.replace(/\.(test|spec|pw)(\.[cm]?[jt]sx?)$/, '$2')))];
 		const production = companions.map((path) => ({ path, before: blob(mergeBase, path), after: blob(head, path) }))
 			.filter((file) => file.before !== null || file.after !== null);
 		return { ...evidence(file), production };
 	});
 	const controls = changed.filter((file) => isControl(file.path) || isControl(file.previousPath)).map(evidence);
-	const productionChanges = changed.filter((file) => /^(src|scripts)\//.test(file.path) && !TEST.test(file.path) && !isControl(file.path)).map(evidence);
+	const productionChanges = changed.filter((file) => (isProduction(file.path) || isProduction(file.previousPath)) &&
+		!TEST.test(file.path) && !TEST.test(file.previousPath) && !isControl(file.path) && !isControl(file.previousPath)).map(evidence);
 	const context = { base, mergeBase, head, changed, tests, controls, productionChanges };
 	if (Buffer.byteLength(JSON.stringify(context)) > maxBytes) {
 		throw new Error(`Review evidence exceeds ${maxBytes} bytes; split the PR (no evidence was truncated)`);

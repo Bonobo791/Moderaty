@@ -21,6 +21,7 @@ function matchesEntityTag(clientHeader: string | null | undefined, etag: string)
 }
 
 function cacheResponse(response: Response, event: Event): Response {
+	if (event.request?.method !== 'GET' && event.request?.method !== 'HEAD') return response;
 	const etag = response.headers.get('etag');
 	if (response.status !== 200 || etag === null || !matchesEntityTag(event.request?.headers.get('if-none-match'), etag)) return response;
 	const cacheHeaders = new Set(['etag', 'cache-control', 'content-location', 'date', 'expires', 'vary', 'set-cookie']);
@@ -86,18 +87,54 @@ export const handle: Handle = async (input) => {
 		}
 		const status = isHttpError(error_) ? error_.status : 500;
 		const body = isHttpError(error_) ? error_.body : await handleError({ error: error_, event, status, message: 'Internal Error' }) ?? { message: 'Internal Error' };
+		if (event.request?.method === 'POST' && event.request.headers.get('x-sveltekit-action') === 'true') {
+			return correlate(json({ type: 'error', error: body }, { status }), event);
+		}
 		if (wantsJson(event)) {
 			return correlate(json(body, { status }), event);
 		}
-		const locale = isBilingualPath(event.url.pathname)
-			? resolveLocale({ cookie: event.cookies.get(LOCALE_COOKIE), acceptLanguage: event.request?.headers.get('accept-language') }) : 'en';
-		const htmlLang = locale === 'pt-BR' ? '<html lang="pt-BR">' : '<html lang="en">';
-		const html = errorPage.replace('<html lang="en">', htmlLang)
+		const html = errorPage
 			.split('%sveltekit.status%').join(String(status))
 			.split('%sveltekit.error.message%').join(escapeHtml(body.message ?? 'Internal Error'));
 		return correlate(new Response(html, { status, headers: { 'content-type': 'text/html; charset=utf-8' } }), event);
 	}
 };
+
+function emitBoundaryFailure(type: 'migration_check_failed' | 'session_lookup_failed', failure: unknown, event: Event) {
+	const controlled = isHttpError(failure);
+	const controlledCategories = { migration_check_failed: 'deployment', session_lookup_failed: 'integrity' } as const;
+	emitOperationalEvent({
+		type, severity: 'error', category: controlled ? controlledCategories[type] : 'database',
+		route: event.route.id, requestId: event.locals.requestId,
+		diagnosticError: controlled ? undefined : failure
+	});
+}
+
+async function resolveSession(event: Event): Promise<void> {
+	const token = event.cookies.get(SESSION_COOKIE);
+	try {
+		const resolution = await getSessionUser(token);
+		event.locals.user = resolution?.user ?? null;
+		if (resolution?.renewed && token) {
+			event.cookies.set(SESSION_COOKIE, token, {
+				path: '/',
+				httpOnly: true,
+				sameSite: 'lax',
+				secure: cookieSecure(),
+				expires: new Date(resolution.expiresAt)
+			});
+		}
+	} catch (e) {
+		// Correlate controlled failures too; never serialize their error body.
+		emitBoundaryFailure('session_lookup_failed', e, event);
+		// A deliberate HttpError (e.g. the account-has-no-org integrity failure)
+		// is NOT an outage: let it fail loudly instead of masking it as
+		// maintenance and signing the user out.
+		if (isHttpError(e)) throw e;
+		event.locals.dbDown = true;
+		event.locals.user = null;
+	}
+}
 
 // Resolves the session cookie into locals.user for every request. When the
 // session slid into its renewal window, the cookie is refreshed with the new
@@ -149,35 +186,13 @@ const handleRequest: Handle = async ({ event, resolve }) => {
 	try {
 		await assertMigrationsCurrent();
 	} catch (e) {
-		emitOperationalEvent({ type: 'migration_check_failed', severity: 'error', category: isHttpError(e) ? 'deployment' : 'database', route: event.route.id, requestId: event.locals.requestId, diagnosticError: isHttpError(e) ? undefined : e });
+		emitBoundaryFailure('migration_check_failed', e, event);
 		if (isHttpError(e)) throw e;
 		event.locals.dbDown = true;
 		event.locals.user = null;
 		return resolveLocalized();
 	}
-	const token = event.cookies.get(SESSION_COOKIE);
-	try {
-		const resolution = await getSessionUser(token);
-		event.locals.user = resolution?.user ?? null;
-		if (resolution?.renewed && token) {
-			event.cookies.set(SESSION_COOKIE, token, {
-				path: '/',
-				httpOnly: true,
-				sameSite: 'lax',
-				secure: cookieSecure(),
-				expires: new Date(resolution.expiresAt)
-			});
-		}
-	} catch (e) {
-		// Correlate controlled failures too; never serialize their error body.
-		emitOperationalEvent({ type: 'session_lookup_failed', severity: 'error', category: isHttpError(e) ? 'integrity' : 'database', route: event.route.id, requestId: event.locals.requestId, diagnosticError: isHttpError(e) ? undefined : e });
-		// A deliberate HttpError (e.g. the account-has-no-org integrity failure)
-		// is NOT an outage: let it fail loudly instead of masking it as
-		// maintenance and signing the user out.
-		if (isHttpError(e)) throw e;
-		event.locals.dbDown = true;
-		event.locals.user = null;
-	}
+	await resolveSession(event);
 	return resolveLocalized();
 };
 

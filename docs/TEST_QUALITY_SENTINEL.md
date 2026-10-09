@@ -2,9 +2,9 @@
 
 The compiled GitHub Actions entry point was removed at the maintainer's request.
 Test Quality Sentinel is disabled in this branch; `test-quality-sentinel.md`
-remains as source. The compiler and its normalization tests remain available,
-using a minimal compiler fixture. Recompiling recreates the executable workflow
-and requires maintainer approval before re-enabling it. The description below
+remains as source. The compiler wrapper, its tests, and its fixture were also
+removed at the maintainer's request. Restoring an executable workflow requires
+maintainer approval. The description below
 documents its behavior when enabled. It runs on opened, updated, reopened and ready PRs
 targeting `dev` or `main`, including drafts, human-authored and stacked PRs.
 The trusted `pull_request_target` trigger runs the workflow from the base branch;
@@ -64,30 +64,6 @@ requires reviewing and publishing its commit first, then updating the workflow's
 pin. PR changes to the collector are evidence only until that explicit update.
 Nothing here modifies repository security settings.
 
-Compile with the reviewed `gh-aw` v0.89.21 binary:
-
-```sh
-mkdir -p .tools
-cp /path/to/reviewed/gh-aw .tools/gh-aw
-node scripts/compile-test-quality-sentinel.mjs
-```
-
-Linux binary SHA-256:
-`1c74ff5fc28b1891d32b67f4348a9b7f750946b6d4a721e909187a848868016b`.
-Commit both Markdown and generated YAML. Inlining enables full prompt hashing
-in the framework's stale-lock check. Review action/container changes on each
-compiler upgrade; never hand-edit generated YAML.
-
-The wrapper accepts no CLI arguments and reads only `.tools/gh-aw`.
-It verifies the compiler checksum, uses the pinned strict compilation
-options, then normalizes the generated gateway mask to a literal `printf`
-command. Masking stays enabled. Unexpected masking output fails visibly;
-recompilation preserves this normalization without manual YAML edits.
-The wrapper also removes the compiler's unused Copilot-secret forwarding from
-the provider-independent OAuth check and its secret manifest. The GitHub
-OAuth checks remain enabled; missing Copilot input is explicitly supported.
-Unexpected Copilot credential references fail compilation.
-
 An agent with repository write access could still weaken/delete the Markdown,
 generated workflow, evidence collector, triggers or prompts. This workflow
 protects the current run from PR edits, but changes merged into the trusted base
@@ -129,7 +105,6 @@ repositories, including:
   verifying that the workflow executable collects evidence without running candidate code.
 
 These tests prove evidence collection and isolation, not AI judgment quality.
-Strict compilation proves schema compatibility and pinned workflow generation.
 Local review of synthetic weakening and legitimate examples is a rubric check;
 it is not a measured live model evaluation. Before treating the reviewer as
 effective, validate actual comments on authorized synthetic PRs with weak

@@ -166,3 +166,41 @@ The strengthened staging race test additionally completes the control's remote
 ban through the external synthetic HTTP boundary. Five assertions were seen
 failing before fixes. The two privacy/design findings remain open even though
 the implemented fixes validate green. No new fixes have been published.
+
+
+## Billing marker and developer dotenv review
+
+Gitar finding 4231570405 is valid. The staging protection refresh replaced a
+billable AI result with a new decision lacking its consumed-call marker.
+Three real-database tests failed before correction: verified and unresolved
+protection overrides wrote no ledger entry, and an exhausted account staged
+free instead of rolling back. Overrides now preserve the original billable
+flag. Tests prove a debit of one credit, the scan-scoped ledger anchor, no
+second debit on rescan retry, preservation of the safe moderation outcome,
+and full rollback on insufficient credit. No billing or persistence mock was
+introduced.
+
+Codex finding 4231580125 is valid. A dev checkout's dotenv file prevented the
+isolated browser app from starting. The browser regression was first run in
+a disposable project with four synthetic dotenv files and failed at the old
+refusal. The launcher now disables Vite dotenv loading and gives SvelteKit
+its own empty environment directory; SvelteKit loads dotenv independently of
+Vite. Its supported inline configuration API receives the actual app compiler
+and kit configuration. No production app configuration was changed.
+
+The fixture serves unchanged source/dependencies via symlinks in the disposable
+project, with generated app output and synthetic .env, .env.local,
+.env.development and .env.development.local files there. It never reads,
+renames, deletes or copies the user's real dotenv files. Child credentials
+remain synthetic and the migrated libSQL database remains disposable.
+The launcher checks both public/private poison markers and the expected
+local database URL; contamination aborts before authentication/seeding.
+A deliberate test-only change pointing SvelteKit back at the poisoned directory
+failed this assertion; the correct isolation was then restored. The browser
+positive-control ban and protected no-ban assertions remain unchanged.
+
+Local verification: 208 files / 4,064 Vitest tests passed, Svelte check had zero
+errors or warnings, E2E type check and production build passed. The Chromium
+case passed with dotenv present; the intentional isolation-negative probe
+failed for the expected reason. The two earlier privacy/handle-log design
+blockers remain unresolved. No fixes from this review have been published.

@@ -1,19 +1,21 @@
 // Test-only launcher: no production route or authentication bypass is added.
 import { createServer } from 'vite';
+import { sveltekit } from '@sveltejs/kit/vite';
+import appConfig from '../../svelte.config.js';
 import { createClient } from '@libsql/client';
 import { drizzle } from 'drizzle-orm/libsql';
 import { migrate } from 'drizzle-orm/libsql/migrator';
 import { randomBytes } from 'node:crypto';
-import { readdir, readFile } from 'node:fs/promises';
+import { mkdir, readFile, realpath } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { authorChannels, banKeyword, channelId, commentPage } from './youtube-fixtures.mjs';
 
 if (!process.send || !process.env.MODERATY_E2E_DIRECTORY) throw new Error('Launch only through the Playwright fixture');
 const root = process.cwd();
-// Vite reads dotenv files itself. Refuse them instead of risking credentials
-// overriding the isolated child environment supplied by the fixture.
-const dotenvFiles = (await readdir(root)).filter(name => name === '.env' || (name.startsWith('.env.') && name !== '.env.example'));
-if (dotenvFiles.length) throw new Error(`E2E refuses dotenv files: ${dotenvFiles.join(', ')}`);
+// Vite and SvelteKit load dotenv independently. Disable Vite dotenv and
+// point SvelteKit at a fresh, empty directory, preserving the app config.
+const isolatedEnvDirectory = join(resolve(process.env.MODERATY_E2E_DIRECTORY), 'empty-env');
+await mkdir(isolatedEnvDirectory);
 const databaseUrl = `file:${join(resolve(process.env.MODERATY_E2E_DIRECTORY), 'disposable.db')}`;
 Object.assign(process.env, {
 	TURSO_DATABASE_URL: databaseUrl, DRY_RUN: 'false',
@@ -60,11 +62,22 @@ const applied = await client.execute('SELECT COUNT(*) AS n FROM __drizzle_migrat
 if (Number(applied.rows[0].n) !== journal.entries.length) throw new Error('Disposable database migration verification failed');
 client.close();
 
-const vite = await createServer({ server: {
-	host: '127.0.0.1', port: 0, strictPort: false,
-	watch: { ignored: ['**/reports/**'] }
-} });
+const { kit: kitConfig, ...svelteConfig } = appConfig;
+const vite = await createServer({
+	configFile: false,
+	envDir: false,
+	plugins: [sveltekit({ ...svelteConfig, ...kitConfig, env: { ...kitConfig.env, dir: isolatedEnvDirectory } })],
+	server: {
+		fs: { allow: [root, await realpath(join(root, 'src')), await realpath(join(root, 'node_modules'))] },
+		host: '127.0.0.1', port: 0, strictPort: false,
+		watch: { ignored: ['**/reports/**'] }
+	}
+});
 await vite.listen();
+const { env: privateEnv } = await vite.ssrLoadModule('$env/dynamic/private');
+if (privateEnv.MODERATY_DOTENV_POISON || vite.config.env.VITE_MODERATY_DOTENV_POISON || privateEnv.TURSO_DATABASE_URL !== databaseUrl) {
+	throw new Error('E2E dotenv isolation failed');
+}
 const { db } = await vite.ssrLoadModule('/src/lib/server/db/index.ts');
 const schema = await vite.ssrLoadModule('/src/lib/server/db/schema.ts');
 const { encrypt } = await vite.ssrLoadModule('/src/lib/server/crypto.ts');

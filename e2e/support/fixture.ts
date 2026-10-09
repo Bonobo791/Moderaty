@@ -1,7 +1,7 @@
 import { test as base, expect } from '@playwright/test';
 import { fork } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -28,9 +28,19 @@ type App = {
 export const test = base.extend<{ app: App }>({
 	app: async ({}, use, testInfo) => {
 		const directory = await mkdtemp(join(tmpdir(), 'moderaty-protected-handle-'));
+		// Exercise a developer checkout with dotenv present without touching
+		// their real files. Symlinks serve the unchanged application source.
+		const project = join(directory, 'project');
+		await mkdir(project);
+		for (const name of ['src', 'static', 'drizzle', 'node_modules', 'package.json', 'package-lock.json', 'svelte.config.js', 'vite.config.ts', 'tsconfig.json']) {
+			await symlink(join(process.cwd(), name), join(project, name));
+		}
+		for (const name of ['.env', '.env.local', '.env.development', '.env.development.local']) {
+			await writeFile(join(project, name), 'MODERATY_DOTENV_POISON=synthetic-poison\nVITE_MODERATY_DOTENV_POISON=synthetic-poison\nDRY_RUN=true\n');
+		}
 		// Do not inherit credentials, NODE_OPTIONS/preloads or dotenv settings.
 		const child = fork(join(import.meta.dirname, 'server.mjs'), [], {
-			cwd: process.cwd(),
+			cwd: project,
 			env: { PATH: process.env.PATH, TMPDIR: directory, NODE_ENV: 'development', MODERATY_E2E_DIRECTORY: directory },
 			stdio: ['ignore', 'pipe', 'pipe', 'ipc']
 		});

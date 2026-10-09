@@ -274,7 +274,12 @@ export async function stageDecisions(channelId: string, decisions: Decision[], o
 		// Verification and staging lock the same channel row. A protection that
 		// committed during scoring must take precedence over the stale verdict.
 		const protection = await loadProtectedIdentities(channelId, transaction);
-		const refreshedDecisions = decisions.map(decision => protectedDecision(decision.comment, protection) ?? decision);
+		const refreshedDecisions = decisions.map(decision => {
+			const protectedOutcome = protectedDecision(decision.comment, protection);
+			// The AI call already consumed budget even if protection changes its
+			// verdict. Preserve that fact for atomic, idempotent ledger charging.
+			return protectedOutcome ? { ...protectedOutcome, billable: decision.billable } : decision;
+		});
 		const committedDecisions = options.rescan
 			? await preserveRescanHumanClaims(handle, channelId, refreshedDecisions, options.rescan.scanStamp, options.protectedIds) : refreshedDecisions;
 		if (!committedDecisions.length) return decisionCounts(committedDecisions);

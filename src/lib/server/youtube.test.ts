@@ -9,7 +9,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 
-import { CommentNotFoundError, deleteComment, fetchNewComments, fetchVideoMetadata, refreshAccessToken, resolveHandleChannelId, setModerationStatus, YOUTUBE_ID_BATCH_SIZE } from './youtube';
+import { CommentNotFoundError, HandleNotFoundError, deleteComment, fetchNewComments, fetchVideoMetadata, refreshAccessToken, resolveHandleChannelId, setModerationStatus, YOUTUBE_ID_BATCH_SIZE } from './youtube';
 
 // Pins the shared constant to YouTube's documented `id`-list cap — a change
 // here is a provider-limit change, not a refactor, and must be deliberate.
@@ -729,4 +729,16 @@ test.each([{}, { items: [] }, { items: [{ id: '' }] }, { items: [{ id: 1 }] }, {
 test('handle lookup rejects provider failure', async () => {
 	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status: 403 })));
 	await expect(resolveHandleChannelId('protected_handle', 'token')).rejects.toThrow('lookup unavailable');
+});
+
+test.each([{}, { items: [] }, { items: null }])('handle lookup distinguishes zero results from malformed data: %j', async (payload) => {
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json(payload)));
+	await expect(resolveHandleChannelId('unknown_handle', 'token')).rejects.toThrow('No YouTube channel uses this handle');
+});
+
+test.each([null, [], { items: 0 }, { items: {} }, { items: [null] }, { items: [{ id: ' ' }] }])('handle lookup still rejects malformed responses: %j', async (payload) => {
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json(payload)));
+	const error = await resolveHandleChannelId('unknown_handle', 'token').catch(error => error);
+	expect(error).toBeInstanceOf(Error);
+	expect(error).not.toBeInstanceOf(HandleNotFoundError);
 });

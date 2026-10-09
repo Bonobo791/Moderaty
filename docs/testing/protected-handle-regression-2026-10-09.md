@@ -56,3 +56,20 @@ Focused real-database tests additionally cover different display names, copied p
 - `npm run build`: passed with the Netlify adapter.
 
 No suite discovery or CI configuration was changed. Playwright explicitly discovers `.pw.ts` files, avoiding Vitest's `.test`/`.spec` patterns. No mutation or property-test configuration was changed. Future integration must reconcile package files and migration numbering/ancestry with other branches before applying migrations. No production migration, push, PR, merge or deployment was performed.
+
+## PR #222 review fixes
+
+Triage validated four functional issues on the published commit `4751ac0`:
+
+- Raw OAuth/lookup errors and decryption diagnostics reached the form. Three failing route regressions reproduced this before the fix. Provider failures now stay in server logs; the browser receives a fixed message, and configuration remains unchanged.
+- Missing `items` looked like malformed provider data. Two failing lookup regressions reproduced this. Missing, NULL or empty items now produce a safe not-found error. Malformed bodies/items and invalid identities remain failures.
+- Two lookups starting with 99 entries could both insert. A synchronized real-database regression failed with 101 rows. The final write now locks and rechecks capacity in a transaction after provider work.
+- Disconnect, same-ID reconnection or ownership transfer during lookup could persist stale protection. Three route regressions failed. The final transaction checks the original owner organization and encrypted connection grant before writing. It cannot resurrect a deleted connection or bind to a replacement grant.
+
+Gitar's proposed change to unresolved-identity moderation was declined because it conflicts with the approved hold-until-verification policy. The cap-before-duplicate behavior and normalized audit handle format predate this PR and remain unchanged.
+
+Codacy's six SQL findings apply PostgreSQL/SQL Server checks to SQLite fixture DDL. The real libSQL migration/browser runs validate that DDL. No SQL dialect substitutions, analyzer exclusions, threshold changes or test removal were used. Function-length/complexity reports and the re-export style suggestion are maintenance advisories, not reproduced functional defects; no unrelated refactor was added. The lookup parser now reuses existing validation helpers as part of its functional fix.
+
+CodeRabbit's requested draft review was rate-limited, and cubic reported its monthly review limit. Those unavailable reviews are not evidence of correctness. Existing CI validation jobs passed on the published commit; they do not run the opt-in Playwright command. Review fixes are validated locally before publication approval.
+
+Review-fix verification: 207 files / 4,058 Vitest tests passed, plus Svelte check (zero errors/warnings), E2E type check, production build and Chromium browser regression. Nine reproducing tests failed before their corresponding fixes; 17 added tests cover fixes and malformed-response boundaries. No fixes have been published at this checkpoint.

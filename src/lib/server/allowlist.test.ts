@@ -173,3 +173,17 @@ test('removal during external resolution cannot report an added protection', asy
 	})).rejects.toThrow('removed during resolution');
 	expect(await rows()).toEqual([]);
 });
+
+test('concurrent resolved adds cannot exceed the cap after awaiting the provider', async () => {
+	await testDb().db.insert(channelAllowedHandles).values(Array.from({ length: 99 }, (_, index) => ({ channelId: 'UC1', handle: `handle-${index}` })));
+	const bothStarted = Promise.withResolvers<void>();
+	let started = 0;
+	const resolve = async () => {
+		if (++started === 2) bothStarted.resolve();
+		await bothStarted.promise;
+		return 'verified-author';
+	};
+	const results = await Promise.allSettled([addHandle('UC1', 'first-new', resolve), addHandle('UC1', 'second-new', resolve)]);
+	expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1);
+	expect(await rows()).toHaveLength(100);
+});

@@ -379,19 +379,26 @@ export async function deleteComment(id: string, accessToken: string, deadline?: 
 	}
 }
 
+/** A verified empty lookup, safe to explain to the channel owner. */
+export class HandleNotFoundError extends Error {
+	constructor() {
+		super('No YouTube channel uses this handle');
+		this.name = 'HandleNotFoundError';
+	}
+}
+
 /** Resolve the handle filter to its authoritative channel identity. */
 export async function resolveHandleChannelId(handle: string, accessToken: string): Promise<string> {
 	const params = new URLSearchParams({ part: 'id', forHandle: handle });
 	const response = await ytFetch(`/channels?${params}`, accessToken);
 	if (!response.ok) throw new Error('YouTube handle lookup unavailable; protection was not changed');
-	const payload: unknown = await response.json();
-	if (!payload || typeof payload !== 'object' || !('items' in payload) || !Array.isArray(payload.items)) {
-		throw new Error('YouTube handle lookup returned malformed data');
-	}
-	if (payload.items.length !== 1) throw new Error('YouTube handle must resolve to exactly one channel');
-	const item: unknown = payload.items[0];
-	if (!item || typeof item !== 'object' || !('id' in item) || typeof item.id !== 'string' || !item.id.trim() || item.id !== item.id.trim()) {
-		throw new Error('YouTube handle lookup returned an invalid channel identity');
-	}
-	return item.id;
+	const payload = object(await response.json(), 'YouTube handle lookup response');
+	const items: unknown = payload.items ?? [];
+	if (!Array.isArray(items)) throw new Error('YouTube handle lookup returned malformed data');
+	if (items.length === 0) throw new HandleNotFoundError();
+	if (items.length !== 1) throw new Error('YouTube handle must resolve to exactly one channel');
+	const item = object(items[0], 'YouTube handle lookup channel');
+	const id = requiredString(item.id, 'YouTube handle lookup channel identity');
+	if (!id.trim() || id !== id.trim()) throw new Error('YouTube handle lookup returned an invalid channel identity');
+	return id;
 }

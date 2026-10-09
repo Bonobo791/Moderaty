@@ -1,10 +1,10 @@
 // Per-channel protected handles bind to verified YouTube channel identities.
 // Protected identities skip rules and AI scoring (identity beats text).
 
-import { and, desc, eq, isNull } from 'drizzle-orm';
+import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 
 import { db } from '$lib/server/db';
-import { channelAllowedHandles } from '$lib/server/db/schema';
+import { channelAllowedHandles, channels } from '$lib/server/db/schema';
 
 export const MAX_HANDLES_PER_CHANNEL = 100;
 
@@ -49,13 +49,20 @@ export async function listHandles(channelId: string) {
 		.all();
 }
 
+type ChannelConnection = Pick<typeof channels.$inferSelect, 'orgId' | 'refreshTokenEnc'>;
+
 /**
  * Adds a handle to a channel's allowlist: validate, enforce the per-channel
  * cap, dedupe. A resolver verifies new UI entries before any write. Verified
  * duplicates keep their original identity. Legacy entries can be resolved
  * in place, including at capacity; adds at capacity remain rejected.
  */
-export async function addHandle(channelId: string, raw: string, resolve?: () => Promise<string>) {
+export async function addHandle(
+	channelId: string,
+	raw: string,
+	resolve?: () => Promise<string>,
+	connection?: ChannelConnection
+) {
 	const handle = validateHandle(raw);
 	const existing = await db
 		.select()
@@ -68,27 +75,43 @@ export async function addHandle(channelId: string, raw: string, resolve?: () => 
 	}
 	if (duplicate?.resolvedChannelId || (duplicate && !resolve)) return duplicate;
 	const resolvedChannelId = resolve ? await resolve() : null;
-	if (duplicate) {
-		const updated = await db
-			.update(channelAllowedHandles)
-			.set({ resolvedChannelId })
-			.where(and(
-				eq(channelAllowedHandles.id, duplicate.id),
-				eq(channelAllowedHandles.channelId, channelId),
-				isNull(channelAllowedHandles.resolvedChannelId)
-			))
-			.returning();
-		if (updated[0]) return updated[0];
-		// A concurrent resolution may win; never rebind its verified identity.
-		const current = (await listHandles(channelId)).find(row => row.id === duplicate.id);
-		if (!current) throw new Error('protected handle was removed during resolution');
-		return current;
-	}
-	const inserted = await db
-		.insert(channelAllowedHandles)
-		.values({ channelId, handle, resolvedChannelId, createdAt: new Date().toISOString() })
-		.returning();
-	return inserted[0];
+	// Network work is complete. Lock and recheck before any durable write.
+	return db.transaction(async (tx) => {
+		if (connection) {
+			const connected = await tx.update(channels)
+				.set({ id: sql`${channels.id}` })
+				.where(and(
+					eq(channels.id, channelId),
+					connection.orgId === null ? isNull(channels.orgId) : eq(channels.orgId, connection.orgId),
+					eq(channels.refreshTokenEnc, connection.refreshTokenEnc)
+				))
+				.returning({ id: channels.id });
+			if (!connected[0]) throw new Error('channel connection changed during handle verification');
+		} else {
+			// Legacy configuration callers also lock before reading capacity.
+			await tx.update(channelAllowedHandles).set({ id: sql`${channelAllowedHandles.id}` })
+				.where(eq(channelAllowedHandles.channelId, channelId));
+		}
+		const current = await tx.select().from(channelAllowedHandles)
+			.where(eq(channelAllowedHandles.channelId, channelId)).all();
+		const sameHandle = current.find(row => row.handle === handle);
+		if (duplicate && sameHandle?.id !== duplicate.id) {
+			throw new Error('protected handle was removed during resolution');
+		}
+		if (current.length >= MAX_HANDLES_PER_CHANNEL && !(sameHandle && !sameHandle.resolvedChannelId && resolve)) {
+			throw new Error(`channel already has the maximum of ${MAX_HANDLES_PER_CHANNEL} protected handles`);
+		}
+		if (sameHandle) {
+			if (sameHandle.resolvedChannelId || !resolve) return sameHandle;
+			const updated = await tx.update(channelAllowedHandles).set({ resolvedChannelId })
+				.where(and(eq(channelAllowedHandles.id, sameHandle.id), eq(channelAllowedHandles.channelId, channelId)))
+				.returning();
+			return updated[0];
+		}
+		const inserted = await tx.insert(channelAllowedHandles)
+			.values({ channelId, handle, resolvedChannelId, createdAt: new Date().toISOString() }).returning();
+		return inserted[0];
+	});
 }
 
 /**

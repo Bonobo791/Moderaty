@@ -8,7 +8,7 @@ import {
 	removeHandle as removeAllowedHandle
 } from '$lib/server/allowlist';
 import { decrypt } from '$lib/server/crypto';
-import { refreshAccessToken, resolveHandleChannelId } from '$lib/server/youtube';
+import { HandleNotFoundError, refreshAccessToken, resolveHandleChannelId } from '$lib/server/youtube';
 import { ownedChannel } from '$lib/server/ownership';
 import { and, eq } from 'drizzle-orm';
 import { fail } from '@sveltejs/kit';
@@ -67,9 +67,15 @@ export const actions = {
 		try {
 			const handle = validateHandle(String(f.get('handle') ?? ''));
 			await addAllowedHandle(params.id, handle, async () => {
-				const token = await refreshAccessToken(decrypt(channel.refreshTokenEnc));
-				return resolveHandleChannelId(handle, token);
-			});
+				try {
+					const token = await refreshAccessToken(decrypt(channel.refreshTokenEnc));
+					return await resolveHandleChannelId(handle, token);
+				} catch (error) {
+					if (error instanceof HandleNotFoundError) throw error;
+					console.error('protected handle verification failed', params.id, error);
+					throw new Error('YouTube handle verification is unavailable; protection was not changed');
+				}
+			}, channel);
 		} catch (e) {
 			return fail(400, { error: e instanceof Error ? e.message : String(e) });
 		}

@@ -57,7 +57,10 @@ test('Codex-disabled vendor hooks omit only missing-hook policy suggestions', ()
 	expect(exclusionReason(warning, root)).toBeNull();
 });
 
-test('the approved AgentShield CI action is pinned to the v1.6.0 commit', () => {
-	const workflow = readFileSync(new URL('../.github/workflows/checks.yml', import.meta.url), 'utf8');
-	expect(workflow).toContain('uses: affaan-m/agentshield@b0891303bdcd6037376a94263d45cfd2ff3dfb98');
+test('the approved AgentShield repository command uses the exact locked dependency', () => {
+	const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+	const lock = JSON.parse(readFileSync(new URL('../package-lock.json', import.meta.url), 'utf8'));
+	expect(manifest.scripts['scan:agents']).toBe('node scripts/agentshield-scan.mjs');
+	expect(manifest.devDependencies['ecc-agentshield']).toBe('1.6.0');
+	expect(lock.packages['node_modules/ecc-agentshield'].version).toBe('1.6.0');
 });

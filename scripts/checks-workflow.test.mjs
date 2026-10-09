@@ -19,7 +19,7 @@ test('validates direct pushes and pull requests on both long-lived branches', ()
 
 test('installs dependencies without automatically running package lifecycle scripts', () => {
 	const installs = [...workflow.matchAll(/^\s+- run: (npm ci[^\n]*)$/gm)].map((match) => match[1]);
-	expect(installs).toEqual(['npm ci --ignore-scripts']);
+	expect(installs).toEqual(['npm ci --ignore-scripts', 'npm ci --ignore-scripts']);
 	// The explicit check command performs the required SvelteKit sync after
 	// installation; disabling npm's automatic prepare hook must not skip it.
 	expect(workflow).toContain('- run: npm run check');

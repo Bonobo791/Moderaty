@@ -1,7 +1,9 @@
 # AgentShield repository scan
 
-Run `npm run scan:agents` with Node 24. This uses the installed, exact
-`ecc-agentshield@1.6.0` dev dependency and scans configuration surfaces locally.
+Run `npm run scan:agents` with Node 24. CI runs this same command after its
+locked dependency install, replacing the standalone action with explicit owner
+approval on 2026-10-09. This uses the installed, exact
+`ecc-agentshield@1.6.0` dev dependency and scans configuration surfaces.
 It does not execute hooks, call a model, apply automatic fixes, or audit the
 application's TypeScript behavior.
 

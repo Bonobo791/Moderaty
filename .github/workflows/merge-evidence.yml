@@ -1,0 +1,83 @@
+name: Merge evidence
+
+on:
+  pull_request:
+    branches: [dev, main]
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: merge-evidence-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  execution:
+    name: Merge evidence verification
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: candidate
+    env:
+      MEG_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      MEG_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: axigatelabs/merge-evidence-gate
+          ref: d72ca6de67c38bab028015991203c7eeff4dce90
+          path: gate-tool
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.19.0'
+      - run: npm ci --ignore-scripts
+      - run: node --test scripts/merge-evidence/tests/verify.mjs
+      - name: Validate gate against real passing and misleading examples
+        id: examples
+        run: node scripts/merge-evidence/examples.mjs
+      # Sync SvelteKit before Vitest; existing checks.yml also checks/builds.
+      - run: npm run check
+      - run: node scripts/merge-evidence/prepare.mjs
+      - id: gate
+        uses: axigatelabs/merge-evidence-gate@d72ca6de67c38bab028015991203c7eeff4dce90
+        with:
+          agents-only: 'false'
+          evidence: run
+          test-command: npm test
+          policy-file: .github/merge-evidence-policy.yml
+          working-directory: candidate
+          fail-on: needs-human
+          base-comparison: auto
+          comment: 'false'
+          sign: none
+          upload-receipt: 'true'
+      # Upstream abstention is not successful test execution. Run even when
+      # the action fails so the underlying process failure remains visible.
+      - name: Require fresh successful execution
+        if: ${{ always() }}
+        env:
+          MEG_RECEIPT_SHA256: ${{ steps.gate.outputs.receipt-sha256 }}
+        run: node scripts/merge-evidence/verify.mjs "$GITHUB_WORKSPACE/receipt.json" .merge-evidence/vitest-results.json "$GITHUB_WORKSPACE/merge-evidence-start.txt"
+      - name: Preserve execution evidence even on rejection
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: merge-evidence-execution-${{ github.run_attempt }}
+          path: |
+            receipt.json
+            merge-evidence-start.txt
+            candidate/.merge-evidence/vitest-results.json
+            ${{ steps.examples.outputs.results-path }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 90

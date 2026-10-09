@@ -7,6 +7,8 @@ declare global {
 	namespace App {
 		// interface Error {}
 		interface Locals {
+			/** Server-generated opaque correlation, never copied from request headers. */
+			requestId: string;
 			user: SessionUser | null;
 			/** Set by hooks when the database is unreachable: pages render a maintenance state instead of a 500. */
 			dbDown?: boolean;

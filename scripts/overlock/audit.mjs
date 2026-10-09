@@ -96,26 +96,40 @@ function conditionEnd(source, start) {
 	return source.length;
 }
 
-function conditionalHunk(file, hunk) {
+function hunkDeclarations(hunk, omitted) {
 	let offset = 0;
-	const lines = hunk.lines.filter((line) => line.kind !== 'del').map((line) => {
+	const lines = hunk.lines.filter((line) => line.kind !== omitted).map((line) => {
 		const entry = { ...line, start: offset, end: offset + line.text.length };
 		offset = entry.end + 1;
 		return entry;
 	});
 	const source = lines.map((line) => line.text).join('\n');
-	// Leading horizontal whitespace cannot span repeated line starts. Token
-	// separators accept newlines so a declaration may span added/context lines.
 	const declarations = /^[ \t]*(?:it|test|describe|suite)\s*\.\s*(?:skipIf|runIf)\s*\(/gm;
-	const findings = [];
-	for (const match of source.matchAll(declarations)) {
+	return [...source.matchAll(declarations)].map((match) => {
 		const end = conditionEnd(source, match.index + match[0].length);
-		const added = lines.find((line) => line.kind === 'add' && line.end >= match.index && line.start < end);
-		if (!added) continue;
+		const line = lines.find((entry) => entry.start <= match.index && entry.end >= match.index);
+		return { text: source.slice(match.index, end), line: line.newLine ?? line.oldLine };
+	});
+}
+
+function conditionalHunk(file, hunk) {
+	// Compare the condition itself on both sides, including deletion-only edits.
+	// Edits to a same-line invocation/body are outside the argument span.
+	const before = new Map();
+	for (const declaration of hunkDeclarations(hunk, 'add')) {
+		before.set(declaration.text, (before.get(declaration.text) ?? 0) + 1);
+	}
+	const findings = [];
+	for (const declaration of hunkDeclarations(hunk, 'del')) {
+		const count = before.get(declaration.text) ?? 0;
+		if (count > 0) {
+			before.set(declaration.text, count - 1);
+			continue;
+		}
 		findings.push({
-			id: `TEST_SKIPPED_ADDED:${file}:${added.newLine}`, rule: 'TEST_SKIPPED_ADDED', severity: 'high',
-			file, line: added.newLine, message: 'Conditional skip/run declaration or condition changed; test execution depends on this condition.',
-			evidence: { after: source.slice(match.index, end) }, fix_hint: 'Run the test unconditionally or obtain a separately reviewed policy change.'
+			id: `TEST_SKIPPED_ADDED:${file}:${declaration.line}`, rule: 'TEST_SKIPPED_ADDED', severity: 'high',
+			file, line: declaration.line, message: 'Conditional skip/run declaration or condition changed; test execution depends on this condition.',
+			evidence: { after: declaration.text }, fix_hint: 'Run the test unconditionally or obtain a separately reviewed policy change.'
 		});
 	}
 	return findings;

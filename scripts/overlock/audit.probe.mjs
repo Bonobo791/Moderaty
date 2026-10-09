@@ -35,6 +35,16 @@ function patch(path, before, after) {
 }
 
 const exact = "it('rejects expired tokens', () => { expect(valid).toBe(false); });";
+
+test('blocks deletion-only narrowing of a runIf condition', () => {
+	const diff = "diff --git a/src/auth.test.ts b/src/auth.test.ts\n--- a/src/auth.test.ts\n+++ b/src/auth.test.ts\n@@ -1,4 +1,3 @@\n it.runIf(\n  process.env.CI\n- || process.env.LOCAL\n )('case', () => { expect(valid).toBe(false); });\n";
+	assert.equal(auditDiff(diff).ok, false);
+});
+
+test('accepts a trailing comment edit on the condition closing line', () => {
+	const diff = "diff --git a/src/auth.test.ts b/src/auth.test.ts\n--- a/src/auth.test.ts\n+++ b/src/auth.test.ts\n@@ -1,3 +1,3 @@\n it.runIf(\n  process.env.CI\n- )('case', () => { expect(valid).toBe(false); });\n+ )('case', () => { expect(valid).toBe(false); }); // Explain the case.\n";
+	assert.equal(auditDiff(diff).ok, true);
+});
 const weakening = [
 	['skip', 'src/auth.test.ts', exact, exact.replace('it(', 'it.skip('), 'TEST_SKIPPED_ADDED'],
 	['only', 'src/auth.test.ts', exact, exact.replace('it(', 'it.only('), 'TEST_SKIPPED_ADDED'],

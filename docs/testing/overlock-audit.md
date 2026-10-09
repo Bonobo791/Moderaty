@@ -63,7 +63,9 @@ Added Vitest `it/test/describe/suite.skipIf(...)` or `.runIf(...)` declarations
 also block through a supplemental detector. It flags direct declarations even
 when the condition currently allows execution, since a later environment can
 skip them. Declarations spanning added and unchanged lines are included, along
-with argument-only changes inside existing multiline declarations. The span
+with argument-only changes inside existing multiline declarations. Old and
+new condition spans are compared, so deletion-only changes also require review
+and unrelated edits after the closing parenthesis do not change the verdict. The span
 scanner handles nested parentheses, quoted strings and comments without
 executing code. Regex/division and template expressions are conservatively
 scoped to the rest of the hunk, so unrelated edits there can require review.
@@ -103,7 +105,7 @@ candidate changes to `PATH` cannot substitute their own Git program.
 
 On October 9, 2026:
 
-- All 46 dedicated probes passed after review fixes. They include deleted files/cases, skip/only/todo,
+- All 48 dedicated probes passed after review fixes. They include deleted files/cases, skip/only/todo,
   conditional skip/run declarations,
   weakened/removed assertions, reduced objects/data, runner filters, coverage
   reductions, disabled CI, and Stryker threshold/scope changes.
@@ -126,6 +128,10 @@ On October 9, 2026:
   integrity verification in a temporary copy caused both tamper probes to
   fail. Fixture template strings were rewritten without changing their cooked
   text, detector assertions or deliberate weakening cases.
+- Deletion-only `runIf` narrowing and an unrelated trailing comment on the
+  condition's closing line each failed their expected verdict before the
+  span-comparison fix, then passed. The earlier condition-change controls
+  remain blocking.
 - The pinned composite action's analysis shell step accepted a legitimate
   change (status 0), rejected a skipped-test change (status 1), and failed on
   empty analysis (status 2). Its final failure step exited 1 for a failed report.

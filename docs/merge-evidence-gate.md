@@ -25,7 +25,8 @@ the claim/runner/diff/reconciliation sources and the committed action bundle.
 - Fail on inflated comparable test counts and a checked claim that tests were
   added when the diff contains no test edits.
 - Surface deleted/skipped/focused tests and verification-layer changes as
-  NEEDS_HUMAN. Both the action and verifier now block these findings;
+  blocking review findings. Runtime-skipped tests also block in the verifier even
+  when the action returns PASS;
   there is no contributor-controlled waiver.
 - Preserve existing failures: automatic failure-time base comparison is enabled, and
   every nonzero head test exit still blocks, including pre-existing failures.
@@ -35,7 +36,9 @@ artifact. A second artifact preserves the receipt, raw per-test results, start
 marker and real-action fixture summary for 90 days, including rejected runs.
 The verifier compares receipt bytes against the action's SHA-256 output,
 checks the actual checkout and independently requires a working Git diff.
-Changes to the gate's own scripts and policies also block for owner review.
+Changes to the gate's own scripts and policies also block for owner review,
+including files renamed out of protected paths. Patch validation discards stdout
+while preserving Git's exit status, so large text diffs do not overflow a buffer.
 Concurrent PR-body edits cancel superseded executions. Comment posting and signing are disabled. Permissions are only
 `contents: read` and `pull-requests: read`; checkouts do not retain credentials.
 No secrets, write-enabled token, `pull_request_target`, self-hosted runner,
@@ -59,7 +62,7 @@ disposable git repositories. It uses no GitHub API token, artifact upload,
 comment posting or remote moderation. It checks the upstream revision and
 bundle contents before execution. The same harness runs in CI.
 
-Local results: 25 verifier/preparation checks passed; all 23 full-feature
+Local results: 28 verifier/preparation checks passed; all 24 full-feature
 real-action scenarios passed their expected outcomes; results are recorded below and in the JSON evidence. Honest human work
 and a legitimate added test passed. Failed assertions, failures without a
 test claim, inflated counts and a false checked tests-added claim were

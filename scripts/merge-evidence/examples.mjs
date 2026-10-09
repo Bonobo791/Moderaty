@@ -25,6 +25,7 @@ const scenarios = [
 	{ name: 'inflated-count', body: '`npm test` passed. 999 tests, 0 failures.', accept: false, check: 'C2' },
 	{ name: 'tests-added-without-tests', body: '`npm test` passed.\n- [x] I have added tests', source: `${source}// Candidate change with no test edit.\n`, accept: false, check: 'C7' },
 	{ name: 'skipped-test', body: '`npm test` passed.', tests: tests.replace("test('adds'", "test.skip('adds'"), accept: false, check: 'C3', review: true },
+	{ name: 'runtime-skipped-test', body: '`npm test` passed. sum.test.js changed.', tests: tests.replace("() => expect(add(2, 3)).toBe(5)", "({ skip }) => { skip(); expect(add(2, 3)).toBe(5); }"), accept: false, runtimeSkip: true },
 	{ name: 'deleted-test', body: '`npm test` passed.', remove: true, accept: false, check: 'C3', review: true },
 	{ name: 'weakened-ci', body: '`npm test` passed.', ci: 'name: checks\non: pull_request\njobs:\n  test:\n    continue-on-error: true\n', accept: false, check: 'C4', review: true },
 	{ name: 'focused-test', body: '`npm test` passed.', tests: tests.replace("test('adds'", "test.only('adds'"), accept: false, check: 'C3', review: true, verdict: 'FAIL' },
@@ -104,6 +105,7 @@ for (const scenario of scenarios) {
 	write('verifier.log', `${verified.stdout}\n${verified.stderr}`);
 	const accepted = verified.status === 0;
 	assert.equal(accepted, scenario.accept, `${scenario.name}: unexpected acceptance; see ${dir}/action.log`);
+	if (scenario.runtimeSkip) { assert.equal(receipt.observed.totals.skipped, 1); assert.match(verified.stderr, /owner review.*skipped/); }
 	if (scenario.localReview) assert.match(verified.stderr, /owner review required for gate changes/);
 	if (scenario.missingBase) assert.match(verified.stderr, /diff could not be independently verified/);
 	if (scenario.check) assert(receipt.discrepancies.some((d) => d.check === scenario.check), `${scenario.name}: expected ${scenario.check}`);
@@ -114,7 +116,7 @@ for (const scenario of scenarios) {
 		if (scenario.preExisting !== undefined) assert.equal(receipt.observed.baseline.pre_existing, scenario.preExisting);
 		if (scenario.introduced > 0) assert(receipt.discrepancies.some((d) => d.check === 'C9'));
 	}
-	const result = { scenario: scenario.name, verdict: receipt.verdict, accepted, reviewRequired: scenario.review ?? scenario.localReview ?? false,
+	const result = { scenario: scenario.name, verdict: receipt.verdict, accepted, reviewRequired: scenario.review ?? scenario.localReview ?? scenario.runtimeSkip ?? false,
 		verifierExit: verified.status, rejectionReason: accepted ? undefined : verified.stderr.trim(),
 		actionExit: run.status, exitCode: receipt.observed.exit_code, tests: receipt.observed.totals, baseline: receipt.observed.baseline, checks: receipt.discrepancies.map((d) => d.check) };
 	results.push(result); console.info(JSON.stringify(result));

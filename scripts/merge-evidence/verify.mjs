@@ -22,11 +22,15 @@ export function verifyReceipt(receipt, { headSha, baseSha, startedAt }) {
 	verifyDiff(receipt.diff);
 	requireEvidence(Array.isArray(receipt.discrepancies) && !receipt.discrepancies.some((d) => d.severity === 'fail'),
 		'failing or missing discrepancy list');
+	verifyVerdict(receipt);
+	return receipt.discrepancies;
+}
+
+function verifyVerdict(receipt) {
 	const review = receipt.discrepancies.filter((d) => d.severity === 'needs-human');
 	requireEvidence(receipt.verdict !== 'NEEDS_HUMAN' && review.length === 0,
-		`owner review required: ${review.map((d) => `${d.check}: ${d.summary}`).join('; ')}`);
+		'owner review required: ' + review.map((d) => d.check + ': ' + d.summary).join('; '));
 	requireEvidence(receipt.verdict === 'PASS', `verdict is ${receipt.verdict}`);
-	return receipt.discrepancies;
 }
 
 function verifyExecution(observed) {
@@ -39,6 +43,7 @@ function verifyExecution(observed) {
 		Number.isSafeInteger(totals[key]) && totals[key] >= 0), 'invalid test totals');
 	requireEvidence(totals.run > 0 && totals.passed > 0 && totals.failed === 0,
 		'no tests passed, or assertions failed');
+	requireEvidence(totals.skipped === 0, 'owner review required: execution skipped tests');
 	requireEvidence(totals.run === totals.passed + totals.failed + totals.skipped, 'inconsistent test totals');
 }
 
@@ -63,7 +68,7 @@ export function verifyFiles(receiptPath, reportPath, context) {
 	const assertions = report.testResults?.flatMap((file) => file.assertionResults ?? []);
 	requireEvidence(Array.isArray(assertions) && assertions.length === receipt.observed.totals.run, 'raw report/receipt count mismatch');
 	requireEvidence(assertions.filter((test) => test.status === 'passed').length === receipt.observed.totals.passed &&
-		assertions.every((test) => test.status !== 'failed'), 'raw report/receipt outcomes disagree');
+		assertions.every((test) => test.status === 'passed'), 'raw report/receipt outcomes disagree');
 	return findings;
 }
 

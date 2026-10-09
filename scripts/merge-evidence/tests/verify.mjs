@@ -6,8 +6,14 @@ import { resolve } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { verifyFiles, verifyReceipt } from '../verify.mjs';
+import { verifyCheckout } from '../checkout.mjs';
 
 const context = { headSha: 'a'.repeat(40), baseSha: 'b'.repeat(40), startedAt: '2026-10-09T12:00:00Z' };
+function writeFreshReport(path, value) {
+	writeFileSync(path, value);
+	const timestamp = new Date('2026-10-09T12:00:01Z');
+	utimesSync(path, timestamp, timestamp);
+}
 const digest = (path) => createHash('sha256').update(readFileSync(path)).digest('hex');
 const receipt = () => ({
 	schema: 'merge-evidence/receipt/v1', generatedAt: '2026-10-09T12:00:01Z',
@@ -53,17 +59,17 @@ for (const target of ['receipt', 'report']) test(`malformed ${target} fails the 
 	const dir = mkdtempSync(resolve(tmpdir(), 'meg-json-'));
 	try {
 		writeFileSync(resolve(dir, 'receipt.json'), JSON.stringify(receipt()));
-		writeFileSync(resolve(dir, 'report.json'), JSON.stringify({ testResults: [{ assertionResults: [
+		writeFreshReport(resolve(dir, 'report.json'), JSON.stringify({ testResults: [{ assertionResults: [
 			{ status: 'passed' }, { status: 'passed' }
 		] }] }));
-		writeFileSync(resolve(dir, `${target}.json`), '{invalid');
+		(target === 'report' ? writeFreshReport : writeFileSync)(resolve(dir, `${target}.json`), '{invalid');
 		writeFileSync(resolve(dir, 'start.txt'), context.startedAt);
 		const run = spawnSync(process.execPath, [new URL('../verify.mjs', import.meta.url).pathname,
 			resolve(dir, 'receipt.json'), resolve(dir, 'report.json'), resolve(dir, 'start.txt')],
 		{ env: { ...process.env, MEG_HEAD_SHA: context.headSha, MEG_BASE_SHA: context.baseSha,
 			MEG_RECEIPT_SHA256: digest(resolve(dir, 'receipt.json')) }, encoding: 'utf8' });
 		assert.equal(run.status, 1);
-		assert.match(run.stderr, new RegExp(`invalid JSON in ${target}`));
+		assert(run.stderr.includes('invalid JSON in ' + target), run.stderr);
 		assert.doesNotMatch(run.stdout, /verified/);
 	} finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -80,10 +86,16 @@ test('malformed manifest fails preparation with file context', () => {
 });
 
 test('fixture harness refuses arbitrary tool and output CLI paths', () => {
-	const run = spawnSync(process.execPath, [new URL('../examples.mjs', import.meta.url).pathname, '/tmp/untrusted', '/tmp/output'], { encoding: 'utf8' });
+	const run = spawnSync(process.execPath, [new URL('../examples.mjs', import.meta.url).pathname, resolve(tmpdir(), 'untrusted'), resolve(tmpdir(), 'output')], { encoding: 'utf8' });
 	assert.notEqual(run.status, 0);
 	assert.match(run.stderr, /does not accept CLI paths/);
 });
+
+function runVerifier(dir, headSha, baseSha) {
+	return spawnSync(process.execPath, [new URL('../verify.mjs', import.meta.url).pathname,
+		'receipt.json', 'report.json', 'start.txt'], { cwd: dir, encoding: 'utf8', env: { ...process.env,
+		MEG_HEAD_SHA: headSha, MEG_BASE_SHA: baseSha, MEG_RECEIPT_SHA256: digest(resolve(dir, 'receipt.json')) } });
+}
 
 test('CLI independently verifies the diff and blocks changes to its own policy', () => {
 	const dir = mkdtempSync(resolve(tmpdir(), 'meg-diff-'));
@@ -96,18 +108,14 @@ test('CLI independently verifies the diff and blocks changes to its own policy',
 		const headSha = git('rev-parse', 'HEAD');
 		const r = receipt(); r.pr.head_sha = headSha; r.pr.base_sha = baseSha;
 		writeFileSync(resolve(dir, 'receipt.json'), JSON.stringify(r));
-		writeFileSync(resolve(dir, 'report.json'), JSON.stringify({ testResults: [{ assertionResults: [{ status: 'passed' }, { status: 'passed' }] }] }));
+		writeFreshReport(resolve(dir, 'report.json'), JSON.stringify({ testResults: [{ assertionResults: [{ status: 'passed' }, { status: 'passed' }] }] }));
 		writeFileSync(resolve(dir, 'start.txt'), context.startedAt);
-		const run = spawnSync(process.execPath, [new URL('../verify.mjs', import.meta.url).pathname,
-			'receipt.json', 'report.json', 'start.txt'], { cwd: dir, encoding: 'utf8', env: { ...process.env,
-			MEG_HEAD_SHA: headSha, MEG_BASE_SHA: baseSha, MEG_RECEIPT_SHA256: digest(resolve(dir, 'receipt.json')) } });
+		const run = runVerifier(dir, headSha, baseSha);
 		assert.equal(run.status, 1);
 		assert.match(run.stderr, /owner review.*\.merge-evidence.yml/);
 		// The same syntactically valid receipt cannot pass outside its checkout.
 		git('checkout', '--detach', '-q', baseSha);
-		const wrong = spawnSync(process.execPath, [new URL('../verify.mjs', import.meta.url).pathname,
-			'receipt.json', 'report.json', 'start.txt'], { cwd: dir, encoding: 'utf8', env: { ...process.env,
-			MEG_HEAD_SHA: headSha, MEG_BASE_SHA: baseSha, MEG_RECEIPT_SHA256: digest(resolve(dir, 'receipt.json')) } });
+		const wrong = runVerifier(dir, headSha, baseSha);
 		assert.equal(wrong.status, 1);
 		assert.match(wrong.stderr, /checkout.*revision/);
 	} finally { rmSync(dir, { recursive: true, force: true }); }
@@ -118,7 +126,7 @@ test('requires freshly written per-test results that agree with the receipt', ()
 	try {
 		const receiptPath = resolve(dir, 'receipt.json'); const reportPath = resolve(dir, 'report.json');
 		writeFileSync(receiptPath, JSON.stringify(receipt()));
-		writeFileSync(reportPath, JSON.stringify({ testResults: [{ assertionResults: [
+		writeFreshReport(reportPath, JSON.stringify({ testResults: [{ assertionResults: [
 			{ fullName: 'first', status: 'passed' }, { fullName: 'second', status: 'passed' }
 		] }] }));
 		const execution = { ...context, receiptSha256: digest(receiptPath) };
@@ -127,9 +135,9 @@ test('requires freshly written per-test results that agree with the receipt', ()
 		assert.doesNotThrow(() => verifyFiles(receiptPath, reportPath, execution));
 		utimesSync(reportPath, new Date('2026-10-08'), new Date('2026-10-08'));
 		assert.throws(() => verifyFiles(receiptPath, reportPath, execution), /fresh report/);
-		writeFileSync(reportPath, JSON.stringify({ testResults: [] }));
+		writeFreshReport(reportPath, JSON.stringify({ testResults: [] }));
 		assert.throws(() => verifyFiles(receiptPath, reportPath, execution), /count mismatch/);
-		writeFileSync(reportPath, JSON.stringify({ testResults: [{ assertionResults: [
+		writeFreshReport(reportPath, JSON.stringify({ testResults: [{ assertionResults: [
 			{ fullName: 'first', status: 'passed' }, { fullName: 'second', status: 'failed' }
 		] }] }));
 		assert.throws(() => verifyFiles(receiptPath, reportPath, execution), /outcomes disagree/);
@@ -150,4 +158,25 @@ test('preparation removes stale artifacts and refuses a narrowed npm test script
 		assert.equal(accepted.status, 0, accepted.stderr);
 		assert.throws(() => readFileSync(resolve(dir, 'receipt.json')), /ENOENT/);
 	} finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+for (const scenario of ['renamed policy', 'large ordinary patch']) test(`checkout handles ${scenario}`, () => {
+	const dir = mkdtempSync(resolve(tmpdir(), 'meg-checkout-'));
+	const git = (...args) => execFileSync('/usr/bin/git', args, { cwd: dir, encoding: 'utf8' }).trim();
+	try {
+		git('init', '-q'); git('config', 'user.email', 'fixture@example.invalid'); git('config', 'user.name', 'Fixture');
+		writeFileSync(resolve(dir, '.merge-evidence.yml'), 'severity: {}'); git('add', '.'); git('commit', '-qm', 'base');
+		const baseSha = git('rev-parse', 'HEAD');
+		if (scenario === 'renamed policy') git('mv', '.merge-evidence.yml', 'ordinary.yml');
+		else writeFileSync(resolve(dir, 'ordinary.txt'), 'ordinary line\n'.repeat(5_000_000));
+		git('add', '.'); git('commit', '-qm', 'head');
+		const revisions = { baseSha, headSha: git('rev-parse', 'HEAD') };
+		if (scenario === 'renamed policy') assert.throws(() => verifyCheckout(revisions, dir), /owner review.*\.merge-evidence.yml/);
+		else assert.doesNotThrow(() => verifyCheckout(revisions, dir));
+	} finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('runtime skips require owner review even when other tests pass', () => {
+	const r = receipt(); r.observed.totals = { run: 2, passed: 1, failed: 0, skipped: 1 };
+	assert.throws(() => verifyReceipt(r, context), /owner review.*skipped/);
 });

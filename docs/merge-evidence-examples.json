@@ -35,7 +35,7 @@
         "retried": 0
       },
       "baseline": {
-        "sha": "4881a2d7d2326cd32d4dd3f0dc30096009d4c668",
+        "sha": "3bf6d92f9e0722dbc63be2166d231f469106df63",
         "exit_code": 0,
         "totals": {
           "run": 2,
@@ -46,8 +46,8 @@
         },
         "pre_existing": 0,
         "introduced": [
-          "/tmp/moderaty-merge-examples-zh4Rif/failing-assertion/sum.test.js::adds",
-          "/tmp/moderaty-merge-examples-zh4Rif/failing-assertion/zero.test.js::adds zero"
+          "/tmp/moderaty-merge-examples-VhTOuI/failing-assertion/sum.test.js::adds",
+          "/tmp/moderaty-merge-examples-VhTOuI/failing-assertion/zero.test.js::adds zero"
         ]
       },
       "checks": [
@@ -73,7 +73,7 @@
         "retried": 0
       },
       "baseline": {
-        "sha": "d8eaa2ea897cc509e8e26496298672f58c625995",
+        "sha": "2639c2d943dc93f14d58200530404553d8eb1e57",
         "exit_code": 0,
         "totals": {
           "run": 2,
@@ -84,8 +84,8 @@
         },
         "pre_existing": 0,
         "introduced": [
-          "/tmp/moderaty-merge-examples-zh4Rif/failure-without-claims/sum.test.js::adds",
-          "/tmp/moderaty-merge-examples-zh4Rif/failure-without-claims/zero.test.js::adds zero"
+          "/tmp/moderaty-merge-examples-VhTOuI/failure-without-claims/sum.test.js::adds",
+          "/tmp/moderaty-merge-examples-VhTOuI/failure-without-claims/zero.test.js::adds zero"
         ]
       },
       "checks": [
@@ -138,7 +138,7 @@
       "accepted": false,
       "reviewRequired": true,
       "verifierExit": 1,
-      "rejectionReason": "Merge evidence rejected: owner review required: C3: 1 skip marker added in this PR",
+      "rejectionReason": "Merge evidence rejected: owner review required: execution skipped tests",
       "actionExit": 1,
       "exitCode": 0,
       "tests": {
@@ -151,6 +151,24 @@
       "checks": [
         "C3"
       ]
+    },
+    {
+      "scenario": "runtime-skipped-test",
+      "verdict": "PASS",
+      "accepted": false,
+      "reviewRequired": true,
+      "verifierExit": 1,
+      "rejectionReason": "Merge evidence rejected: owner review required: execution skipped tests",
+      "actionExit": 0,
+      "exitCode": 0,
+      "tests": {
+        "run": 2,
+        "passed": 1,
+        "failed": 0,
+        "skipped": 1,
+        "retried": 0
+      },
+      "checks": []
     },
     {
       "scenario": "deleted-test",
@@ -209,7 +227,7 @@
         "retried": 0
       },
       "baseline": {
-        "sha": "4e3232dc48e0fb1525c78aa7deb02cee874c8117",
+        "sha": "2259b7b1fd6a8f32fd2f2c15901a75e57f20285d",
         "exit_code": 0,
         "totals": {
           "run": 2,
@@ -220,7 +238,7 @@
         },
         "pre_existing": 0,
         "introduced": [
-          "/tmp/moderaty-merge-examples-zh4Rif/focused-test/sum.test.js::adds"
+          "/tmp/moderaty-merge-examples-VhTOuI/focused-test/sum.test.js::adds"
         ]
       },
       "checks": [
@@ -405,7 +423,7 @@
       "accepted": false,
       "reviewRequired": false,
       "verifierExit": 1,
-      "rejectionReason": "fatal: Not a valid commit name ffffffffffffffffffffffffffffffffffffffff\nMerge evidence rejected: PR diff could not be independently verified",
+      "rejectionReason": "Merge evidence rejected: PR diff could not be independently verified",
       "actionExit": 0,
       "exitCode": 0,
       "tests": {
@@ -434,7 +452,7 @@
         "retried": 0
       },
       "baseline": {
-        "sha": "f658d4e8057a4aafe78c9593e1d69bfa50e051cc",
+        "sha": "949717b70a6f3104f0d824faa0042f8e21d98be3",
         "exit_code": 1,
         "totals": {
           "run": 2,
@@ -465,7 +483,7 @@
         "retried": 0
       },
       "baseline": {
-        "sha": "b5d8b2fbef721485a7da490894ef522d0eaea8a5",
+        "sha": "a5e839b32aafaf34dd5cc56fb957e9dfcc391502",
         "exit_code": 0,
         "totals": {
           "run": 2,
@@ -476,7 +494,7 @@
         },
         "pre_existing": 0,
         "introduced": [
-          "/tmp/moderaty-merge-examples-zh4Rif/removed-test-with-failure/sum.test.js::adds"
+          "/tmp/moderaty-merge-examples-VhTOuI/removed-test-with-failure/sum.test.js::adds"
         ]
       },
       "checks": [

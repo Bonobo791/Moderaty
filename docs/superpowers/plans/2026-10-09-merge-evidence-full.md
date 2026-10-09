@@ -41,8 +41,9 @@ Files: `.github/merge-evidence-policy.yml`, `.github/workflows/merge-evidence.ym
 - [x] Explicitly configure all C1–C9 severities, `fail-on: needs-human`, `base-comparison: auto` and no scope exemptions.
 - [x] Verify action exits, outputs, summaries, per-test evidence and baseline attribution in every case.
 - [x] Document all enabled features, bootstrap review blocking and separate permission proposals.
-- [ ] Run `npm run check`, `npm run build`, `npm test`; commit only after all pass.
-- [ ] Triage current PR findings, report local results and ask before publishing the fixes or editing PR metadata.
+- [x] Run `npm run check`, `npm run build`, `npm test`; commit only after all pass.
+- [x] Triage current PR findings and validate scoped local fixes.
+- [ ] Publish fixes and update PR metadata after owner approval, then repeat hosted review.
 
 
 ## Execution record
@@ -59,3 +60,20 @@ Files: `.github/merge-evidence-policy.yml`, `.github/workflows/merge-evidence.ym
   default Netlify build passed. No existing application tests/configuration changed.
 - Overlock PR #221's six paths have no overlap.
 - Publication, hosted re-analysis, security approvals and second review remain pending.
+
+## PR #218 review regressions
+
+- Reproduced and fixed renamed gate policies bypassing protected-path detection,
+  a 70 MB text patch exhausting the discarded-output buffer, and mixed passing/
+  runtime-skipped tests receiving an upstream PASS.
+- Reproduced historical filesystem timestamps breaking the test fixtures.
+  Fixtures now set explicit matching report mtimes; stale-report rejection stays intact.
+- Node suite: 28 checks passed normally and with historical filesystem writes.
+  Real pinned action: 24 expected outcomes passed, including runtime skip rejection.
+- Codacy's dynamic-regex warning used a fixed two-value test enum, and Sonar's
+  public-directory warnings referred to rejected CLI path arguments. Removed
+  the flagged patterns, retained the rejection tests, and simplified shared
+  CLI setup and verdict validation. Hosted re-analysis awaits approved publication.
+
+- Fresh application validation after review fixes: check zero errors/warnings,
+  Netlify build passed, 4,021 tests across 206 files passed.

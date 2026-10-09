@@ -66,7 +66,9 @@ async function loadAuthorHandles(
 	let handles = new Map<string, string>();
 	let handleLookupError = false;
 	try {
-		handles = await fetchAuthorHandles(newComments.map(comment => comment.authorChannelId), accessToken, deadline);
+		const lookup = await fetchAuthorHandles(newComments.map(comment => comment.authorChannelId), accessToken, deadline);
+		handles = lookup;
+		handleLookupError = Boolean(lookup.skippedItems);
 	} catch (error) {
 		if (error instanceof DeadlineExceededError) throw error;
 		console.warn('YouTube author-handle lookup failed; continuing without audit handles', error);
@@ -141,18 +143,18 @@ const rulesForChannel = prepareRules(await db.select().from(rules).where(eq(rule
 // KEY, failing the entire staging transaction (I1: one bad item never
 // aborts the batch).
 const seen = new Set<string>();
-const newComments = page.comments.filter((comment) => {
+const freshComments = page.comments.filter((comment) => {
 	if (existingIds.has(comment.id) || seen.has(comment.id) || stagedIds.has(comment.id) || protectedIdSet.has(comment.id)) return false;
 	seen.add(comment.id);
 	return true;
 });
 // Idle/already-staged pages need configuration only. Pending destructive
 // actions independently resolve protection in enforcement when necessary.
-const allowlist = await loadProtectedIdentities(channelId, db, newComments.length
+const allowlist = await loadProtectedIdentities(channelId, db, freshComments.length
 	? handle => resolveHandleChannelId(handle, options.accessToken, options.deadline)
 	: undefined);
-const { handles, handleLookupError } = await loadAuthorHandles(newComments, options.accessToken, options.deadline);
-for (const comment of newComments) comment.authorHandle = handles.get(comment.authorChannelId) ?? null;
+const { handles, handleLookupError } = await loadAuthorHandles(freshComments, options.accessToken, options.deadline);
+const newComments = freshComments.map(comment => ({ ...comment, authorHandle: handles.get(comment.authorChannelId) ?? null }));
 // A ticked protection flag forces the tone pass on even below
 // TONE_LEVEL_OMNI_AND_TONE: the channel owner asked for heightened scrutiny,
 // so the checkbox must never be a silent no-op.

@@ -412,6 +412,7 @@ export class YoutubeLookupError extends Error {
 
 async function fetchIdentitySnippets(resource: 'channels' | 'comments', ids: string[], accessToken: string, deadline?: number) {
 	const result = new Map<string, Record<string, unknown>>();
+	let skippedItems = 0;
 	const unique = [...new Set(ids.filter(Boolean))];
 	for (let index = 0; index < unique.length; index += YOUTUBE_ID_BATCH_SIZE) {
 		const batch = unique.slice(index, index + YOUTUBE_ID_BATCH_SIZE);
@@ -425,15 +426,16 @@ async function fetchIdentitySnippets(resource: 'channels' | 'comments', ids: str
 				const id = requiredString(item.id, 'identity lookup ID');
 				if (!batch.includes(id)) throw new Error('Unexpected identity lookup ID');
 				result.set(id, object(item.snippet, 'identity lookup snippet'));
-			} catch { console.warn('YouTube identity lookup skipped a malformed item'); }
+			} catch { skippedItems += 1; }
 		}
 	}
-	return result;
+	if (skippedItems) console.warn('YouTube identity lookup skipped malformed items', { resource, skippedItems });
+	return { snippets: result, skippedItems };
 }
 
 /** Authoritative normalized handles for audit retention; IDs stay in memory. */
-export async function fetchAuthorHandles(ids: string[], accessToken: string, deadline?: number): Promise<Map<string, string>> {
-	const snippets = await fetchIdentitySnippets('channels', ids, accessToken, deadline);
+export async function fetchAuthorHandles(ids: string[], accessToken: string, deadline?: number): Promise<Map<string, string> & { skippedItems?: number }> {
+	const { snippets, skippedItems } = await fetchIdentitySnippets('channels', ids, accessToken, deadline);
 	const result = new Map<string, string>();
 	for (const [id, snippet] of snippets) {
 		const raw = snippet.customUrl;
@@ -441,12 +443,12 @@ export async function fetchAuthorHandles(ids: string[], accessToken: string, dea
 		const handle = raw.slice(1).toLowerCase();
 		if (/^[\p{L}\p{N}._-]{3,30}$/u.test(handle)) result.set(id, handle);
 	}
-	return result;
+	return skippedItems ? Object.assign(result, { skippedItems }) : result;
 }
 
 /** Re-read pending comment authors before destructive enforcement, without storage. */
 export async function fetchCommentAuthorIds(ids: string[], accessToken: string, deadline?: number): Promise<Map<string, string>> {
-	const snippets = await fetchIdentitySnippets('comments', ids, accessToken, deadline);
+	const { snippets } = await fetchIdentitySnippets('comments', ids, accessToken, deadline);
 	const result = new Map<string, string>();
 	for (const [id, snippet] of snippets) {
 		const author = snippet.authorChannelId;

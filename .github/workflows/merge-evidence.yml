@@ -9,6 +9,10 @@ permissions:
   contents: read
   pull-requests: read
 
+concurrency:
+  group: merge-evidence-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   execution:
     runs-on: ubuntu-24.04
@@ -38,7 +42,8 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: node --test scripts/merge-evidence/tests/verify.mjs
       - name: Validate gate against real passing and misleading examples
-        run: node scripts/merge-evidence/examples.mjs "$GITHUB_WORKSPACE/gate-tool" "$RUNNER_TEMP/merge-evidence-examples"
+        id: examples
+        run: node scripts/merge-evidence/examples.mjs
       # Sync SvelteKit before Vitest; existing checks.yml also checks/builds.
       - run: npm run check
       - run: node scripts/merge-evidence/prepare.mjs
@@ -50,8 +55,8 @@ jobs:
           test-command: npm test
           policy-file: .github/merge-evidence-policy.yml
           working-directory: candidate
-          fail-on: fail
-          base-comparison: never
+          fail-on: needs-human
+          base-comparison: auto
           comment: 'false'
           sign: none
           upload-receipt: 'true'
@@ -59,4 +64,19 @@ jobs:
       # the action fails so the underlying process failure remains visible.
       - name: Require fresh successful execution
         if: ${{ always() }}
+        env:
+          MEG_RECEIPT_SHA256: ${{ steps.gate.outputs.receipt-sha256 }}
         run: node scripts/merge-evidence/verify.mjs "$GITHUB_WORKSPACE/receipt.json" .merge-evidence/vitest-results.json "$GITHUB_WORKSPACE/merge-evidence-start.txt"
+      - name: Preserve execution evidence even on rejection
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: merge-evidence-execution-${{ github.run_attempt }}
+          path: |
+            receipt.json
+            merge-evidence-start.txt
+            candidate/.merge-evidence/vitest-results.json
+            ${{ steps.examples.outputs.results-path }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 90

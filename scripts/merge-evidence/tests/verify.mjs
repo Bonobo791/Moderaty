@@ -3,16 +3,18 @@ import { test } from 'node:test';
 import { mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { verifyFiles, verifyReceipt } from '../verify.mjs';
 
 const context = { headSha: 'a'.repeat(40), baseSha: 'b'.repeat(40), startedAt: '2026-10-09T12:00:00Z' };
+const digest = (path) => createHash('sha256').update(readFileSync(path)).digest('hex');
 const receipt = () => ({
 	schema: 'merge-evidence/receipt/v1', generatedAt: '2026-10-09T12:00:01Z',
 	pr: { head_sha: context.headSha, base_sha: context.baseSha },
 	observed: { command: 'npm test -- --reporter=json --outputFile=.merge-evidence/vitest-results.json',
 		exit_code: 0, totals: { run: 2, passed: 2, failed: 0, skipped: 0 } },
-	diff: {}, verdict: 'PASS', discrepancies: []
+	diff: { tests: { added: [], deleted: [], skipped_added: [], focused: [] }, sensitive_paths: [], lockfiles: [], snapshots: [] }, verdict: 'PASS', discrepancies: []
 });
 
 test('accepts evidence from a fresh successful execution at the requested revision', () => {
@@ -30,6 +32,7 @@ for (const [name, change] of [
 	['another head', (r) => { r.pr.head_sha = 'c'.repeat(40); }],
 	['another base', (r) => { r.pr.base_sha = 'c'.repeat(40); }],
 	['an unreliable diff', (r) => { r.diff.unreliable = true; }],
+	['an incomplete diff', (r) => { r.diff = {}; }],
 	['a neutral abstention', (r) => { r.verdict = 'NEUTRAL'; }],
 	['a contradicted claim', (r) => { r.verdict = 'FAIL'; }],
 	['a different command', (r) => { r.observed.command = 'echo pass'; }],
@@ -40,10 +43,74 @@ for (const [name, change] of [
 	assert.throws(() => verifyReceipt(r, context));
 });
 
-test('preserves explicit review findings without claiming they are approved', () => {
+test('blocks review findings without claiming they are approved', () => {
 	const r = receipt(); r.verdict = 'NEEDS_HUMAN';
 	r.discrepancies = [{ check: 'C4', severity: 'needs-human', summary: 'CI edited' }];
-	assert.deepEqual(verifyReceipt(r, context), r.discrepancies);
+	assert.throws(() => verifyReceipt(r, context), /owner review.*C4.*CI edited/);
+});
+
+for (const target of ['receipt', 'report']) test(`malformed ${target} fails the CLI with file context`, () => {
+	const dir = mkdtempSync(resolve(tmpdir(), 'meg-json-'));
+	try {
+		writeFileSync(resolve(dir, 'receipt.json'), JSON.stringify(receipt()));
+		writeFileSync(resolve(dir, 'report.json'), JSON.stringify({ testResults: [{ assertionResults: [
+			{ status: 'passed' }, { status: 'passed' }
+		] }] }));
+		writeFileSync(resolve(dir, `${target}.json`), '{invalid');
+		writeFileSync(resolve(dir, 'start.txt'), context.startedAt);
+		const run = spawnSync(process.execPath, [new URL('../verify.mjs', import.meta.url).pathname,
+			resolve(dir, 'receipt.json'), resolve(dir, 'report.json'), resolve(dir, 'start.txt')],
+		{ env: { ...process.env, MEG_HEAD_SHA: context.headSha, MEG_BASE_SHA: context.baseSha,
+			MEG_RECEIPT_SHA256: digest(resolve(dir, 'receipt.json')) }, encoding: 'utf8' });
+		assert.equal(run.status, 1);
+		assert.match(run.stderr, new RegExp(`invalid JSON in ${target}`));
+		assert.doesNotMatch(run.stdout, /verified/);
+	} finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('malformed manifest fails preparation with file context', () => {
+	const dir = mkdtempSync(resolve(tmpdir(), 'meg-manifest-'));
+	try {
+		writeFileSync(resolve(dir, 'package.json'), '{invalid');
+		const run = spawnSync(process.execPath, [new URL('../prepare.mjs', import.meta.url).pathname],
+			{ cwd: dir, encoding: 'utf8' });
+		assert.notEqual(run.status, 0);
+		assert.match(run.stderr, /invalid JSON in package.json/);
+	} finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('fixture harness refuses arbitrary tool and output CLI paths', () => {
+	const run = spawnSync(process.execPath, [new URL('../examples.mjs', import.meta.url).pathname, '/tmp/untrusted', '/tmp/output'], { encoding: 'utf8' });
+	assert.notEqual(run.status, 0);
+	assert.match(run.stderr, /does not accept CLI paths/);
+});
+
+test('CLI independently verifies the diff and blocks changes to its own policy', () => {
+	const dir = mkdtempSync(resolve(tmpdir(), 'meg-diff-'));
+	const git = (...args) => execFileSync('/usr/bin/git', args, { cwd: dir, encoding: 'utf8' }).trim();
+	try {
+		git('init', '-q'); git('config', 'user.email', 'fixture@example.invalid'); git('config', 'user.name', 'Fixture');
+		writeFileSync(resolve(dir, 'source.js'), 'base'); git('add', '.'); git('commit', '-qm', 'base');
+		const baseSha = git('rev-parse', 'HEAD');
+		writeFileSync(resolve(dir, '.merge-evidence.yml'), 'severity: {}'); git('add', '.'); git('commit', '-qm', 'head');
+		const headSha = git('rev-parse', 'HEAD');
+		const r = receipt(); r.pr.head_sha = headSha; r.pr.base_sha = baseSha;
+		writeFileSync(resolve(dir, 'receipt.json'), JSON.stringify(r));
+		writeFileSync(resolve(dir, 'report.json'), JSON.stringify({ testResults: [{ assertionResults: [{ status: 'passed' }, { status: 'passed' }] }] }));
+		writeFileSync(resolve(dir, 'start.txt'), context.startedAt);
+		const run = spawnSync(process.execPath, [new URL('../verify.mjs', import.meta.url).pathname,
+			'receipt.json', 'report.json', 'start.txt'], { cwd: dir, encoding: 'utf8', env: { ...process.env,
+			MEG_HEAD_SHA: headSha, MEG_BASE_SHA: baseSha, MEG_RECEIPT_SHA256: digest(resolve(dir, 'receipt.json')) } });
+		assert.equal(run.status, 1);
+		assert.match(run.stderr, /owner review.*\.merge-evidence.yml/);
+		// The same syntactically valid receipt cannot pass outside its checkout.
+		git('checkout', '--detach', '-q', baseSha);
+		const wrong = spawnSync(process.execPath, [new URL('../verify.mjs', import.meta.url).pathname,
+			'receipt.json', 'report.json', 'start.txt'], { cwd: dir, encoding: 'utf8', env: { ...process.env,
+			MEG_HEAD_SHA: headSha, MEG_BASE_SHA: baseSha, MEG_RECEIPT_SHA256: digest(resolve(dir, 'receipt.json')) } });
+		assert.equal(wrong.status, 1);
+		assert.match(wrong.stderr, /checkout.*revision/);
+	} finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('requires freshly written per-test results that agree with the receipt', () => {
@@ -54,15 +121,18 @@ test('requires freshly written per-test results that agree with the receipt', ()
 		writeFileSync(reportPath, JSON.stringify({ testResults: [{ assertionResults: [
 			{ fullName: 'first', status: 'passed' }, { fullName: 'second', status: 'passed' }
 		] }] }));
-		assert.doesNotThrow(() => verifyFiles(receiptPath, reportPath, context));
+		const execution = { ...context, receiptSha256: digest(receiptPath) };
+		assert.throws(() => verifyFiles(receiptPath, reportPath, context), /receipt digest/);
+		assert.throws(() => verifyFiles(receiptPath, reportPath, { ...execution, receiptSha256: '0'.repeat(64) }), /receipt digest/);
+		assert.doesNotThrow(() => verifyFiles(receiptPath, reportPath, execution));
 		utimesSync(reportPath, new Date('2026-10-08'), new Date('2026-10-08'));
-		assert.throws(() => verifyFiles(receiptPath, reportPath, context), /fresh report/);
+		assert.throws(() => verifyFiles(receiptPath, reportPath, execution), /fresh report/);
 		writeFileSync(reportPath, JSON.stringify({ testResults: [] }));
-		assert.throws(() => verifyFiles(receiptPath, reportPath, context), /count mismatch/);
+		assert.throws(() => verifyFiles(receiptPath, reportPath, execution), /count mismatch/);
 		writeFileSync(reportPath, JSON.stringify({ testResults: [{ assertionResults: [
 			{ fullName: 'first', status: 'passed' }, { fullName: 'second', status: 'failed' }
 		] }] }));
-		assert.throws(() => verifyFiles(receiptPath, reportPath, context), /outcomes disagree/);
+		assert.throws(() => verifyFiles(receiptPath, reportPath, execution), /outcomes disagree/);
 	} finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

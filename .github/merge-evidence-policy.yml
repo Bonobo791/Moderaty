@@ -1,4 +1,4 @@
-version: moderaty-2026-10-09
+version: moderaty-full-2026-10-09
 agents-only: false
 test-command: npm test
 severity:
@@ -6,5 +6,8 @@ severity:
   C2: fail
   C3: needs-human
   C4: needs-human
+  C5: needs-human
+  C6: needs-human
   C7: fail
+  C8: needs-human
   C9: fail

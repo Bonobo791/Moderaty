@@ -581,6 +581,7 @@ test('broken logging sinks preserve a maintenance response', async () => {
 });
 
 test.each([['migration', 503], ['session', 500]])('deliberate %s failures retain status, safe message, noindex and request header', async (boundary, status) => {
+	const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
 	let failure;
 	try { error(status as number, 'Controlled failure'); } catch (e) { failure = e; }
 	(boundary === 'migration' ? mocks.assertMigrationsCurrent : mocks.getSessionUser).mockRejectedValue(failure);
@@ -593,6 +594,13 @@ test.each([['migration', 503], ['session', 500]])('deliberate %s failures retain
 	expect(response.headers.get('x-robots-tag')).toBe('noindex');
 	expect(event.locals.dbDown).toBeUndefined();
 	expect(resolve).not.toHaveBeenCalled();
+	expect(errorLog).toHaveBeenCalledTimes(1);
+	expect(JSON.parse(errorLog.mock.calls[0][0])).toMatchObject({
+		type: boundary === 'migration' ? 'migration_check_failed' : 'session_lookup_failed',
+		severity: 'error', category: 'database', route: '/(app)/dashboard',
+		requestId: response.headers.get('x-request-id')
+	});
+	expect(JSON.stringify(errorLog.mock.calls)).not.toContain('Controlled failure');
 });
 
 test('concurrent requests get distinct server IDs and leave authentication redirects intact', async () => {
@@ -642,7 +650,12 @@ test('immutable redirect headers and existing cookies survive correlation', asyn
 	expect(response.headers.get('x-request-id')).not.toBe('client-controlled-secret');
 });
 
-test.each(['application/json;q=0, text/html', 'text/html, application/json;q=0.2'])('controlled errors honor HTML preference: %s', async (accept) => {
+test.each([
+	'application/json;q=0, text/html',
+	'text/html, application/json;q=0.2',
+	'application/json;q=0, application/*;q=1, text/html;q=0.5',
+	'application/json;q=0.2, application/*;q=1, text/html;q=0.5'
+])('controlled errors honor HTML preference: %s', async (accept) => {
 	let failure;
 	try { error(503, 'Controlled failure'); } catch (e) { failure = e; }
 	mocks.assertMigrationsCurrent.mockRejectedValue(failure);
@@ -652,7 +665,7 @@ test.each(['application/json;q=0, text/html', 'text/html, application/json;q=0.2
 	expect(response.headers.get('content-type')).toBe('text/html; charset=utf-8');
 });
 
-test.each(['*/*', 'application/*', 'application/json;q=0.8, text/html;q=0.2', 'application/json ; q=0.8, text/html;q=0.2'])('controlled errors honor JSON preference: %s', async (accept) => {
+test.each(['*/*', 'application/*', 'application/json;q=0.8, text/html;q=0.2', 'application/json ; q=0.8, text/html;q=0.2', 'text/html;q=0, text/*;q=1, application/json;q=0.5'])('controlled errors honor JSON preference: %s', async (accept) => {
 	let failure;
 	try { error(503, 'Controlled failure'); } catch (e) { failure = e; }
 	mocks.assertMigrationsCurrent.mockRejectedValue(failure);
@@ -674,7 +687,7 @@ test('data requests keep controlled errors as JSON despite an HTML Accept header
 	expect(response.headers.get('x-request-id')).toMatch(/^[0-9a-f-]{36}$/);
 });
 
-test.each(['"same-page"', 'W/"same-page"'])('conditional responses preserve correlation and noindex: %s', async (ifNoneMatch) => {
+test.each(['"same-page"', 'W/"same-page"', '*', '"other", "same-page"', 'W/"other", W/"same-page"'])('conditional responses preserve correlation and noindex: %s', async (ifNoneMatch) => {
 	mocks.getSessionUser.mockResolvedValue(null);
 	const event = { ...makeEvent(), route: { id: '/(app)/dashboard' }, request: new Request('http://localhost/dashboard', { headers: { 'if-none-match': ifNoneMatch } }) };
 	const response = await handle({ event, resolve: async () => new Response('unchanged page', { headers: { etag: '"same-page"', 'cache-control': 'private, max-age=0', 'set-cookie': 'one=synthetic; HttpOnly', 'content-type': 'text/html' } }) } as never);
@@ -686,6 +699,15 @@ test.each(['"same-page"', 'W/"same-page"'])('conditional responses preserve corr
 	expect(response.headers.get('cache-control')).toBe('private, max-age=0');
 	expect(response.headers.get('set-cookie')).toBe('one=synthetic; HttpOnly');
 	expect(response.headers.get('content-type')).toBeNull();
+});
+
+test.each(['"other"', '"same-page-extra"', '"prefix,same-page"'])('nonmatching conditional tags keep the response body: %s', async (ifNoneMatch) => {
+	mocks.getSessionUser.mockResolvedValue(null);
+	const event = { ...makeEvent(), request: new Request('http://localhost/', { headers: { 'if-none-match': ifNoneMatch } }) };
+	const response = await handle({ event, resolve: async () => new Response('changed page', { headers: { etag: '"same-page"' } }) } as never);
+	expect(response.status).toBe(200);
+	expect(await response.text()).toBe('changed page');
+	expect(response.headers.get('x-request-id')).toMatch(/^[0-9a-f-]{36}$/);
 });
 
 test('data-request auth redirects preserve the framework redirect payload and correlation', async () => {

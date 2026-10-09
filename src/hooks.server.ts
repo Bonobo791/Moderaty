@@ -17,8 +17,10 @@ type Event = Parameters<Handle>[0]['event'];
 function cacheResponse(response: Response, event: Event): Response {
 	const etag = response.headers.get('etag');
 	const clientHeader = event.request?.headers.get('if-none-match');
-	const clientTag = clientHeader?.startsWith('W/"') ? clientHeader.slice(2) : clientHeader;
-	if (response.status !== 200 || etag === null || clientTag !== etag) return response;
+	// Match complete quoted tags: a comma can also occur inside an opaque tag.
+	const tags = clientHeader?.match(/(?:W\/)?"[^"]*"/g) ?? [];
+	const matches = clientHeader?.trim() === '*' || tags.some((tag) => tag.replace(/^W\//, '') === etag?.replace(/^W\//, ''));
+	if (response.status !== 200 || etag === null || !matches) return response;
 	const cacheHeaders = new Set(['etag', 'cache-control', 'content-location', 'date', 'expires', 'vary', 'set-cookie']);
 	const headers = new Headers(Array.from(response.headers).filter(([key]) => cacheHeaders.has(key)));
 	// Preserve separate Set-Cookie fields rather than a comma-joined value.
@@ -58,13 +60,15 @@ function wantsJson(event: Event): boolean {
 		if (media === '*/*') specificity = 0;
 		else if (media.endsWith('/*')) specificity = 1;
 		return { media, quality, order, specificity };
-	}).filter(({ quality }) => Number.isFinite(quality) && quality > 0 && quality <= 1)
-		.toSorted((a, b) => b.quality - a.quality || b.specificity - a.specificity || a.order - b.order);
-	for (const { media } of ranges) {
-		if (['application/json', 'application/*', '*/*'].includes(media)) return true;
-		if (['text/html', 'text/*'].includes(media)) return false;
-	}
-	return false;
+	}).filter(({ quality }) => Number.isFinite(quality) && quality >= 0 && quality <= 1)
+		.toSorted((a, b) => b.specificity - a.specificity || b.quality - a.quality || a.order - b.order);
+	// A representation's most specific range sets its quality, including q=0.
+	// Only then compare the acceptable representations with each other.
+	const candidates = ['application/json', 'text/html'].flatMap((representation) => {
+		const range = ranges.find(({ media }) => media === representation || media === representation.split('/')[0] + '/*' || media === '*/*');
+		return range && range.quality > 0 ? [{ ...range, representation }] : [];
+	}).toSorted((a, b) => b.quality - a.quality || b.specificity - a.specificity || a.order - b.order);
+	return candidates[0]?.representation === 'application/json';
 }
 
 // Hook-thrown errors are rendered outside resolve() by SvelteKit, which drops
@@ -143,8 +147,8 @@ const handleRequest: Handle = async ({ event, resolve }) => {
 	try {
 		await assertMigrationsCurrent();
 	} catch (e) {
-		if (isHttpError(e)) throw e;
 		emitOperationalEvent({ type: 'migration_check_failed', severity: 'error', category: 'database', route: event.route.id, requestId: event.locals.requestId });
+		if (isHttpError(e)) throw e;
 		event.locals.dbDown = true;
 		event.locals.user = null;
 		return resolveLocalized();
@@ -163,12 +167,12 @@ const handleRequest: Handle = async ({ event, resolve }) => {
 			});
 		}
 	} catch (e) {
+		// Correlate controlled failures too; never serialize their error body.
+		emitOperationalEvent({ type: 'session_lookup_failed', severity: 'error', category: 'database', route: event.route.id, requestId: event.locals.requestId });
 		// A deliberate HttpError (e.g. the account-has-no-org integrity failure)
 		// is NOT an outage: let it fail loudly instead of masking it as
 		// maintenance and signing the user out.
 		if (isHttpError(e)) throw e;
-		// Neither Drizzle's parameter wrapper nor the raw provider cause is safe.
-		emitOperationalEvent({ type: 'session_lookup_failed', severity: 'error', category: 'database', route: event.route.id, requestId: event.locals.requestId });
 		event.locals.dbDown = true;
 		event.locals.user = null;
 	}

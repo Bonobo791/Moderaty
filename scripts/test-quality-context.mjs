@@ -5,14 +5,21 @@ import { pathToFileURL } from 'node:url';
 
 const SHA = /^[a-f0-9]{40}$/;
 const TEST = /\.(test|spec)\.[cm]?[jt]sx?$/;
-const CONTROL = /(^\.github\/workflows\/|(^|\/)(package(-lock)?\.json|vitest[^/]*|vite\.config\.[^/]+|playwright\.config\.[^/]+|stryker[^/]*|tsconfig[^/]*))/;
+const CONTROL_NAMES = ['package.json', 'package-lock.json'];
+const CONTROL_PREFIXES = ['vitest', 'vite.config.', 'playwright.config.', 'stryker', 'tsconfig'];
+function isControl(path) {
+	const filename = path.split('/').at(-1);
+	return path.startsWith('.github/workflows/') || CONTROL_NAMES.includes(filename) ||
+		CONTROL_PREFIXES.some((prefix) => filename.startsWith(prefix));
+}
 
 // This collects review evidence, not a quality verdict. Candidate files are data:
 // never imported, checked out, evaluated or passed to a shell.
 export function collectContext({ repo = process.cwd(), base, head, maxBytes = 2_000_000 }) {
 	if (!SHA.test(base) || !SHA.test(head)) throw new Error('Expected full commit SHA for base and head');
-	const git = (...args) => execFileSync('git', ['--literal-pathspecs', ...args], {
-		cwd: repo, encoding: 'utf8', maxBuffer: 8_000_000
+	const git = (...args) => execFileSync('/usr/bin/git', ['--literal-pathspecs', ...args], {
+		cwd: repo, encoding: 'utf8', maxBuffer: 8_000_000,
+		env: { ...process.env, PATH: '/usr/bin:/bin' }
 	});
 	git('cat-file', '-e', `${base}^{commit}`);
 	git('cat-file', '-e', `${head}^{commit}`);
@@ -41,8 +48,8 @@ export function collectContext({ repo = process.cwd(), base, head, maxBytes = 2_
 			.filter((file) => file.before !== null || file.after !== null);
 		return { ...evidence(file), production };
 	});
-	const controls = changed.filter((file) => CONTROL.test(file.path) || CONTROL.test(file.previousPath)).map(evidence);
-	const productionChanges = changed.filter((file) => /^(src|scripts)\//.test(file.path) && !TEST.test(file.path) && !CONTROL.test(file.path)).map(evidence);
+	const controls = changed.filter((file) => isControl(file.path) || isControl(file.previousPath)).map(evidence);
+	const productionChanges = changed.filter((file) => /^(src|scripts)\//.test(file.path) && !TEST.test(file.path) && !isControl(file.path)).map(evidence);
 	const context = { base, mergeBase, head, changed, tests, controls, productionChanges };
 	if (Buffer.byteLength(JSON.stringify(context)) > maxBytes) {
 		throw new Error(`Review evidence exceeds ${maxBytes} bytes; split the PR (no evidence was truncated)`);

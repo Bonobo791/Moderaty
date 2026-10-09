@@ -1,7 +1,16 @@
-import { expect, test } from 'vitest';
+import { beforeEach, expect, test, vi } from 'vitest';
 import { TEST_OWNER, postForm, setupTestDb, testDb } from '$lib/server/testdb';
 import { channelAllowedHandles, channels, rules } from '$lib/server/db/schema';
 
+import { HandleNotFoundError } from '$lib/server/youtube';
+import { encrypt } from '$lib/server/crypto';
+const provider = vi.hoisted(() => ({ resolve: vi.fn(), refresh: vi.fn() }));
+vi.mock('$env/dynamic/private', () => ({ env: { ENCRYPTION_KEY: 'synthetic-test-key' } }));
+vi.mock('$lib/server/youtube', async (original) => ({ ...(await original<typeof import('$lib/server/youtube')>()), resolveHandleChannelId: provider.resolve, refreshAccessToken: provider.refresh }));
+beforeEach(() => {
+	provider.resolve.mockReset().mockResolvedValue('verified-author');
+	provider.refresh.mockReset().mockResolvedValue('synthetic-token');
+});
 import { actions, load } from './+page.server';
 
 setupTestDb(['rules', 'channels', 'channel_allowed_handles']);
@@ -9,7 +18,7 @@ setupTestDb(['rules', 'channels', 'channel_allowed_handles']);
 const OWNER = TEST_OWNER;
 
 async function seedChannel(channelId: string, userId: string | null = OWNER.id, orgId: string | null = 'org-1') {
-	await testDb().db.insert(channels).values({ id: channelId, userId, orgId, title: 'Ch', refreshTokenEnc: 'enc' });
+	await testDb().db.insert(channels).values({ id: channelId, userId, orgId, title: 'Ch', refreshTokenEnc: encrypt('synthetic-refresh') });
 }
 
 const RULES_URL = 'http://localhost/channels/UC1/rules?/remove';
@@ -249,7 +258,7 @@ test('addHandle validates, normalizes, and stores the handle', async () => {
 	const res = await addHandle('UC1', '  @SomeUser ');
 	expect(res).toEqual({ ok: true });
 
-	expect(await handleRows()).toEqual([expect.objectContaining({ channelId: 'UC1', handle: 'someuser' })]);
+	expect(await handleRows()).toEqual([expect.objectContaining({ channelId: 'UC1', handle: 'someuser', resolvedChannelId: 'verified-author' })]);
 });
 
 test('addHandle rejects an invalid handle with 400 and inserts nothing', async () => {
@@ -334,4 +343,67 @@ test('removeHandle rejects a signed-out request with 401 and the row survives', 
 
 	await expect(removeHandle('UC1', String(id), null)).rejects.toMatchObject({ status: 401 });
 	expect(await handleRows()).toHaveLength(1);
+});
+
+test('failed verification leaves the protection database unchanged', async () => {
+	await seedChannel('UC1');
+	provider.resolve.mockRejectedValueOnce(new Error('lookup unavailable'));
+	expect(await addHandle('UC1', 'someuser')).toMatchObject({ status: 400 });
+	expect(await handleRows()).toEqual([]);
+});
+test('existing legacy entry is resolved in place after explicit owner action', async () => {
+	await seedChannel('UC1');
+	await testDb().db.insert(channelAllowedHandles).values({ channelId: 'UC1', handle: 'someuser' });
+	expect(await addHandle('UC1', 'someuser')).toEqual({ ok: true });
+	expect(await handleRows()).toEqual([expect.objectContaining({ resolvedChannelId: 'verified-author' })]);
+	expect(provider.resolve).toHaveBeenCalledWith('someuser', 'synthetic-token');
+});
+test('a duplicate verified handle retains its original identity without lookup', async () => {
+	await seedChannel('UC1');
+	await testDb().db.insert(channelAllowedHandles).values({ channelId: 'UC1', handle: 'someuser', resolvedChannelId: 'original-holder' });
+	expect(await addHandle('UC1', 'someuser')).toEqual({ ok: true });
+	expect((await handleRows())[0].resolvedChannelId).toBe('original-holder');
+	expect(provider.resolve).not.toHaveBeenCalled();
+});
+
+test.each(['refresh', 'lookup', 'decrypt'])('verification %s failures are server-only and cannot alter protection', async (boundary) => {
+	await seedChannel('UC1');
+	await testDb().db.insert(channelAllowedHandles).values({ channelId: 'UC1', handle: 'someuser' });
+	const before = await handleRows();
+	const diagnostic = new Error('provider diagnostic: synthetic-sensitive-marker');
+	const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+	try {
+		if (boundary === 'refresh') provider.refresh.mockRejectedValueOnce(diagnostic);
+		if (boundary === 'lookup') provider.resolve.mockRejectedValueOnce(diagnostic);
+		if (boundary === 'decrypt') {
+			await testDb().db.update(channels).set({ refreshTokenEnc: 'invalid-synthetic-ciphertext' });
+		}
+		const result = await addHandle('UC1', 'someuser');
+		expect(result).toMatchObject({ status: 400, data: { error: 'YouTube handle verification is unavailable; protection was not changed' } });
+		expect(JSON.stringify(result)).not.toContain('synthetic-sensitive-marker');
+		expect(log).toHaveBeenCalledWith('protected handle verification failed', 'UC1', expect.any(Error));
+		expect(await handleRows()).toEqual(before);
+	} finally { log.mockRestore(); }
+});
+
+test('a verified no-match response gives a safe actionable error and adds nothing', async () => {
+	await seedChannel('UC1');
+	provider.resolve.mockRejectedValueOnce(new HandleNotFoundError());
+	expect(await addHandle('UC1', 'unknown_handle')).toMatchObject({ status: 400, data: { error: 'No YouTube channel uses this handle' } });
+	expect(await handleRows()).toEqual([]);
+});
+
+test.each(['disconnect', 'reconnect', 'transfer'])('a %s during verification cannot persist stale protection', async (change) => {
+	await seedChannel('UC1');
+	provider.resolve.mockImplementationOnce(async () => {
+		if (change === 'disconnect') await testDb().db.delete(channels);
+		if (change === 'reconnect') {
+			await testDb().db.delete(channels);
+			await seedChannel('UC1');
+		}
+		if (change === 'transfer') await testDb().db.update(channels).set({ orgId: 'other-org' });
+		return 'verified-author';
+	});
+	expect(await addHandle('UC1', 'someuser')).toMatchObject({ status: 400, data: { error: 'channel connection changed during handle verification' } });
+	expect(await handleRows()).toEqual([]);
 });

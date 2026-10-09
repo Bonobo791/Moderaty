@@ -492,6 +492,7 @@ describe('channel_allowed_handles', () => {
 			id: { notNull: true, primary: true, autoIncrement: true },
 			channel_id: { notNull: true },
 			handle: { notNull: true },
+			resolved_channel_id: { notNull: false },
 			created_at: { notNull: true, hasDefault: true }
 		});
 		// Channel-child tables deliberately carry no .references() — orphan

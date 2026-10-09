@@ -1,0 +1,5 @@
+{
+	"extends": "../tsconfig.json",
+	"compilerOptions": { "allowJs": true, "checkJs": false, "strict": true, "types": ["node"] },
+	"include": ["./**/*.ts", "./**/*.mjs", "../playwright.config.ts"]
+}

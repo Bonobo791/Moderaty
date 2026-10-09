@@ -498,6 +498,13 @@
       "when": 1791150244877,
       "tag": "0070_human_recovery_progress",
       "breakpoints": true
+    },
+    {
+      "idx": 71,
+      "version": "6",
+      "when": 1791550883462,
+      "tag": "0071_protected_channel_identity",
+      "breakpoints": true
     }
   ]
 }

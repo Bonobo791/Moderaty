@@ -18,6 +18,22 @@ export function normalizeGatewayMask(workflow) {
 	return workflow.replace(ORIGINAL_MASK, (_, indent) => indent + MASK_COMMAND);
 }
 
+export function normalizeCodexWorkflow(workflow) {
+	const metadata = JSON.parse(workflow.match(/^# gh-aw-metadata: (.+)$/m)?.[1] ?? '{}');
+	if (metadata.agent_id !== 'codex') throw new Error('Expected a compiled Codex workflow');
+	// The compiler adds a provider-independent OAuth check. Do not give it an unused Copilot secret.
+	const normalized = normalizeGatewayMask(workflow)
+		.replace(/^ +COPILOT_GITHUB_TOKEN: \$\{\{ secrets\.COPILOT_GITHUB_TOKEN \}\}\n/gm, '')
+		.replace(/^#   - COPILOT_GITHUB_TOKEN\n/gm, '')
+		.replace(/^# gh-aw-manifest: (.+)$/m, (_, json) => {
+			const manifest = JSON.parse(json);
+			manifest.secrets = manifest.secrets.filter((name) => name !== 'COPILOT_GITHUB_TOKEN');
+			return '# gh-aw-manifest: ' + JSON.stringify(manifest);
+		});
+	if (normalized.includes('secrets.COPILOT_GITHUB_TOKEN')) throw new Error('Unexpected Copilot credential reference');
+	return normalized;
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
 	try {
 		if (process.argv.length !== 2) throw new Error('Compiler path is fixed; no CLI arguments are accepted');
@@ -27,8 +43,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
 		execFileSync(COMPILER, ['compile', 'test-quality-sentinel', '--strict', '--action-mode', 'release',
 			'--action-tag', 'c35393777e5604a63721d09512263b1383301d4f', '--no-check-update'], { stdio: 'inherit' });
 		const path = '.github/workflows/test-quality-sentinel.lock.yml';
-		writeFileSync(path, normalizeGatewayMask(readFileSync(path, 'utf8')));
-		process.stdout.write('Normalized gateway masking command; credentials remain masked\n');
+		writeFileSync(path, normalizeCodexWorkflow(readFileSync(path, 'utf8')));
+		process.stdout.write('Normalized Codex workflow; gateway masked and unused Copilot secret omitted\n');
 	} catch (error) {
 		process.stderr.write('Sentinel compilation failed: ' + error.message + '\n');
 		process.exitCode = 1;

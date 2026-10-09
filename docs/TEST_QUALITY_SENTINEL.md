@@ -19,35 +19,32 @@ completed; concerns are in its comment, not a deterministic blocking verdict.
 
 ## Runtime and permissions
 
-Uses the `COPILOT_GITHUB_TOKEN` repository secret for Copilot inference,
-not application OpenAI/YouTube/database credentials. For this personal
-repository, create a fine-grained PAT owned by your user account with
-**Account permissions → Copilot Requests: Read**, then add it privately under
-**Settings → Secrets and variables → Actions** as `COPILOT_GITHUB_TOKEN`.
-The token owner needs an active Copilot license and access to the selected model.
-Do not paste the token into PR comments, source files or workflow logs.
-
-The workflow deliberately omits `copilot-requests: write`: that Actions-token
-path requires centralized organization Copilot billing and ignores the PAT.
-The live Actions-token attempts rejected both the default model and explicit
-GPT-5.4. Until the secret is configured, the sentinel fails visibly; there is
-no successful-review fallback. See [GitHub's authentication guide](https://github.github.com/gh-aw/reference/auth/).
+Uses OpenAI-hosted Codex inference with a `CODEX_API_KEY` repository secret,
+or `OPENAI_API_KEY` when the former is absent. Add a dedicated OpenAI API key
+privately under **Settings → Secrets and variables → Actions**. Neither a
+Copilot token nor a Copilot license is used. The workflow fails visibly if
+neither OpenAI secret is configured; it never substitutes a successful review.
+Do not paste credentials into PR comments, source files or workflow logs.
 
 The agent has read-only contents/PR permissions. The generated safe-output and
 conclusion jobs request `issues: write` and `pull-requests: write` for GitHub's
 comment machinery; they do not check out or execute candidate code. Issue
 failure reports are disabled. All action references are immutable SHAs and
-container images have digests. The main Copilot CLI version is pinned to
-`1.0.87`, with explicit `copilot/gpt-5.4` model selection. An unpinned
-`auto` alias selected an unsupported model during the initial live run. The framework's secondary detection engine is compiler-managed.
+container images have digests. The Codex CLI version is pinned to
+`0.154.0`, with explicit `gpt-5.4` model selection and OpenAI inference.
+The framework's secondary detection engine also uses Codex and the same OpenAI credential.
 
 The collector is checked out separately at the reviewed immutable commit
 `81ea1fd9aee316893c2c4a22de4ea75644be8ca8`. The evidence repository stays
 at the event's base SHA. The collector fetches the PR head
 as Git data, verifies the fetched SHA and compares from the merge base. It never
 checks out, imports or runs candidate files. Credentials are not persisted by
-checkout or by the fetch invocation. The agent's default checkout and file
-editing tools are disabled; custom instructions are disabled with `bare`.
+checkout or by the fetch invocation. The agent's default checkout, shell and file
+editing tools are disabled. `project_doc_max_bytes=0` disables automatic
+AGENTS.md instructions. Read-only GitHub MCP tools provide additional source
+context. A trusted pre-agent step validates the evidence head and required
+arrays, then appends JSON to the already rendered prompt. Candidate strings
+are data; they are never evaluated as shell code or workflow templates.
 The compiler's activation/detection jobs may read candidate files as data.
 
 Evidence includes complete before/after bodies and related source. More than
@@ -83,6 +80,10 @@ It verifies the compiler checksum, uses the pinned strict compilation
 options, then normalizes the generated gateway mask to a literal `printf`
 command. Masking stays enabled. Unexpected masking output fails visibly;
 recompilation preserves this normalization without manual YAML edits.
+The wrapper also removes the compiler's unused Copilot-secret forwarding from
+the provider-independent OAuth check and its secret manifest. The GitHub
+OAuth checks remain enabled; missing Copilot input is explicitly supported.
+Unexpected Copilot credential references fail compilation.
 
 An agent with repository write access could still weaken/delete the Markdown,
 generated workflow, evidence collector, triggers or prompts. This workflow
@@ -95,9 +96,11 @@ separately authorized ruleset/CODEOWNERS policy. No policy was changed here.
 Switching to `pull_request_target` makes the base-branch workflow the trusted
 control plane. The generated activation job excludes forks before accessing
 secrets. The agent has read-only permissions, checks out only the base SHA and
-the pinned collector, and reads candidate commits as Git data. No new or removed
-secrets, actions, containers, or network redirects accompany this change;
-`COPILOT_GITHUB_TOKEN` remains the inference credential. The trigger's compiler
+the pinned collector, and reads candidate commits as Git data. The Codex migration removes Copilot credential forwarding and introduces
+`CODEX_API_KEY` / `OPENAI_API_KEY` for inference. Both main and detection runs
+use the framework's OpenAI proxy, which keeps real keys outside the agent
+container. No action pins, container pins or custom network redirects change.
+OpenAI inference replaces the Copilot inference destination. The trigger's compiler
 security warning is expected and reviewed for these constraints.
 
 The add-mask audit rule flags every masking command, regardless of shell syntax.

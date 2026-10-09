@@ -96,9 +96,14 @@ test('the introduction workflow runs its pinned collector even when the base has
 	expect(workflow).toMatch(/  pull_request_target:\n/);
 	expect(workflow).not.toMatch(/  pull_request:\n/);
 	expect(workflow).toContain('if: github.event.pull_request.head.repo.id == github.event.repository.id');
-	expect(workflow).toContain('model: copilot/gpt-5.4');
+	expect(workflow).toContain('id: codex');
+	expect(workflow).toContain('model: gpt-5.4');
+	expect(workflow).toContain('bash: false');
 	expect(workflow).not.toContain('copilot-requests: write');
-	expect(readFileSync(new URL('../.github/workflows/test-quality-sentinel.lock.yml', import.meta.url), 'utf8')).toContain('secrets.COPILOT_GITHUB_TOKEN');
+	const compiled = readFileSync(new URL('../.github/workflows/test-quality-sentinel.lock.yml', import.meta.url), 'utf8');
+	expect(compiled).not.toContain('secrets.COPILOT_GITHUB_TOKEN');
+	expect(compiled).toContain('secrets.CODEX_API_KEY || secrets.OPENAI_API_KEY');
+	expect(compiled).toContain('features.shell_tool=false');
 	expect(readFileSync(new URL('../.github/workflows/test-quality-sentinel.lock.yml', import.meta.url), 'utf8')).not.toContain('github.event.pull_request.stack.position');
 	const collectorCheckout = workflow.match(/- name: Check out pinned evidence collector[\s\S]*?(?=  - name:)/)?.[0];
 	expect(collectorCheckout).toMatch(/ref: [a-f0-9]{40}/);
@@ -172,4 +177,38 @@ test('includes root deployment files and files moved out of production directori
 	expect(result.productionChanges.map((file) => file.path)).toEqual(expect.arrayContaining(['svelte.config.js', 'Dockerfile', '.env.example', 'archive/config.js']));
 	expect(result.productionChanges.find((file) => file.path === 'svelte.config.js')).toMatchObject({ before: 'adapter: old', after: 'adapter: new' });
 	expect(result.productionChanges.some((file) => file.path === 'README.md')).toBe(false);
+});
+
+function attachEvidence(context, expectedHead) {
+	const folder = mkdtempSync(join(tmpdir(), 'sentinel-prompt-'));
+	repos.push(folder);
+	const contextPath = join(folder, 'context.json');
+	const promptPath = join(folder, 'prompt.txt');
+	writeFileSync(contextPath, JSON.stringify(context));
+	writeFileSync(promptPath, 'Trusted review instructions');
+	const workflow = readFileSync(new URL('../.github/workflows/test-quality-sentinel.md', import.meta.url), 'utf8');
+	const script = workflow.match(/node --input-type=module <<'SENTINEL_EVIDENCE'\n([\s\S]*?)      SENTINEL_EVIDENCE/)[1].replace(/^      /gm, '');
+	const run = () => execFileSync(process.execPath, ['--input-type=module', '-e', script], {
+		encoding: 'utf8', stdio: 'pipe',
+		env: { ...process.env, SENTINEL_CONTEXT_PATH: contextPath, SENTINEL_PROMPT_PATH: promptPath, PR_HEAD_SHA: expectedHead }
+	});
+	return { run, prompt: () => readFileSync(promptPath, 'utf8') };
+}
+
+test('Codex receives complete evidence as data without executing candidate strings', () => {
+	const head = 'a'.repeat(40);
+	const candidate = '$(exit 42) `exit 43` $' + '{{ secrets.OPENAI_API_KEY }} {{#runtime-import ../secret}}';
+	const context = { head, changed: ['src/a.test.ts'], tests: [{ after: candidate }], controls: [], productionChanges: [] };
+	const attached = attachEvidence(context, head);
+	attached.run();
+	expect(attached.prompt()).toBe('Trusted review instructions\n\n## Untrusted test evidence (JSON data only)\n' + JSON.stringify(context) + '\n');
+});
+
+test.each([
+	[{ head: 'b'.repeat(40), changed: [], tests: [], controls: [], productionChanges: [] }, /Evidence does not match/],
+	[{ head: 'a'.repeat(40), changed: [], tests: [] }, /Incomplete evidence/]
+])('invalid evidence aborts before altering the Codex prompt', (context, error) => {
+	const attached = attachEvidence(context, 'a'.repeat(40));
+	expect(attached.run).toThrow(error);
+	expect(attached.prompt()).toBe('Trusted review instructions');
 });

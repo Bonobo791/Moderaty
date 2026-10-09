@@ -130,3 +130,31 @@ test('retains package and nested runner configuration as control evidence', () =
 	const f = fixture(Object.fromEntries(paths.map((path) => [path, 'before\n'])), Object.fromEntries(paths.map((path) => [path, 'after\n'])));
 	expect(collectContext(f).controls.map(({ path }) => path).sort()).toEqual(paths.sort());
 });
+
+test('workflow collector runs against an older base without executing the candidate collector', () => {
+	const f = fixture({ 'src/a.test.ts': 'before\n' }, {
+		'src/a.test.ts': 'after\n',
+		'scripts/test-quality-context.mjs': 'throw new Error("UNTRUSTED COLLECTOR EXECUTED");\n'
+	});
+	f.git('checkout', '--quiet', f.base);
+	const workflow = readFileSync(new URL('../.github/workflows/test-quality-sentinel.md', import.meta.url), 'utf8');
+	// Emulate the separate trusted checkout without requiring CI to fetch Git history.
+	const checkout = workflow.match(/name: Check out pinned evidence collector[\s\S]*?ref: ([a-f0-9]{40})[\s\S]*?path: ([^\n]+)/);
+	if (checkout) {
+		const path = join(f.repo, checkout[2].trim(), 'scripts/test-quality-context.mjs');
+		mkdirSync(dirname(path), { recursive: true });
+		writeFileSync(path, readFileSync(new URL('./test-quality-context.mjs', import.meta.url), 'utf8'));
+	}
+	const command = workflow.match(/^      node (.+)$/m)[1];
+	const output = join(f.repo, 'context.json');
+	const run = () => execFileSync(process.execPath, [command], {
+		cwd: f.repo, encoding: 'utf8', stdio: 'pipe',
+		env: { ...process.env, PR_BASE_SHA: f.base, PR_HEAD_SHA: f.head, SENTINEL_CONTEXT_PATH: output }
+	});
+	expect(run).not.toThrow();
+	const context = JSON.parse(readFileSync(output, 'utf8'));
+	expect(context.base).toBe(f.base);
+	expect(context.head).toBe(f.head);
+	expect(context.tests[0].after).toBe('after\n');
+	expect(context.productionChanges[0].after).toContain('UNTRUSTED COLLECTOR EXECUTED');
+});

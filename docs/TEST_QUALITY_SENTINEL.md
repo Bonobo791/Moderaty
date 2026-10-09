@@ -82,7 +82,9 @@ repositories, including:
 - a legitimate regression-only `.spec.ts` addition;
 - docs-only edits, oversized evidence and invalid refs;
 - candidate code that throws if executed and unrelated working-tree edits;
-- wildcard filenames, ensuring diffs cannot accidentally include other tests.
+- wildcard filenames, ensuring diffs cannot accidentally include other tests;
+- an older base missing the collector and a malicious candidate collector,
+  verifying that the workflow executable collects evidence without running candidate code.
 
 These tests prove evidence collection and isolation, not AI judgment quality.
 Strict compilation proves schema compatibility and pinned workflow generation.

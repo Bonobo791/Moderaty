@@ -258,6 +258,7 @@ export async function createTestDb(): Promise<TestDb> {
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			channel_id TEXT NOT NULL,
 			handle TEXT NOT NULL,
+			resolved_channel_id TEXT,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`,
 		`CREATE INDEX channel_allowed_handles_channel_idx ON channel_allowed_handles (channel_id)`,

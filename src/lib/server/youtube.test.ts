@@ -9,7 +9,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 
-import { CommentNotFoundError, deleteComment, fetchNewComments, fetchVideoMetadata, refreshAccessToken, setModerationStatus, YOUTUBE_ID_BATCH_SIZE } from './youtube';
+import { CommentNotFoundError, deleteComment, fetchNewComments, fetchVideoMetadata, refreshAccessToken, resolveHandleChannelId, setModerationStatus, YOUTUBE_ID_BATCH_SIZE } from './youtube';
 
 // Pins the shared constant to YouTube's documented `id`-list cap — a change
 // here is a provider-limit change, not a refactor, and must be deliberate.
@@ -711,4 +711,22 @@ test('refreshAccessToken fails loudly when the token response lacks an access to
 	await expect(refreshAccessToken('refresh-token')).rejects.toThrow(
 		'token refresh response access_token is missing or invalid'
 	);
+});
+
+test('handle lookup uses the authoritative forHandle filter, never the display name', async () => {
+	const fetch = vi.fn().mockResolvedValue(Response.json({ items: [{ id: 'verified-author' }] }));
+	vi.stubGlobal('fetch', fetch);
+	expect(await resolveHandleChannelId('protected_handle', 'token')).toBe('verified-author');
+	const url = new URL(fetch.mock.calls[0][0]);
+	expect(url.searchParams.get('forHandle')).toBe('protected_handle');
+	expect(url.searchParams.get('part')).toBe('id');
+	expect(url.searchParams.has('id')).toBe(false);
+});
+test.each([{}, { items: [] }, { items: [{ id: '' }] }, { items: [{ id: 1 }] }, { items: [{ id: 'a' }, { id: 'b' }] }])('handle lookup rejects missing or ambiguous identity: %j', async (payload) => {
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json(payload)));
+	await expect(resolveHandleChannelId('protected_handle', 'token')).rejects.toThrow();
+});
+test('handle lookup rejects provider failure', async () => {
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status: 403 })));
+	await expect(resolveHandleChannelId('protected_handle', 'token')).rejects.toThrow('lookup unavailable');
 });

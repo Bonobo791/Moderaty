@@ -18,6 +18,8 @@ export interface NewComment {
 	videoId: string | null;
 	authorChannelId: string;
 	authorName: string;
+	/** Verified configured handle, populated by protection matching only. */
+	authorHandle?: string | null;
 	text: string;
 	publishedAt: string;
 }
@@ -375,4 +377,21 @@ export async function deleteComment(id: string, accessToken: string, deadline?: 
 		const body = await res.text();
 		throw writeFailure(res.status, `comments.delete failed: ${res.status} ${body}`);
 	}
+}
+
+/** Resolve the handle filter to its authoritative channel identity. */
+export async function resolveHandleChannelId(handle: string, accessToken: string): Promise<string> {
+	const params = new URLSearchParams({ part: 'id', forHandle: handle });
+	const response = await ytFetch(`/channels?${params}`, accessToken);
+	if (!response.ok) throw new Error('YouTube handle lookup unavailable; protection was not changed');
+	const payload: unknown = await response.json();
+	if (!payload || typeof payload !== 'object' || !('items' in payload) || !Array.isArray(payload.items)) {
+		throw new Error('YouTube handle lookup returned malformed data');
+	}
+	if (payload.items.length !== 1) throw new Error('YouTube handle must resolve to exactly one channel');
+	const item: unknown = payload.items[0];
+	if (!item || typeof item !== 'object' || !('id' in item) || typeof item.id !== 'string' || !item.id.trim() || item.id !== item.id.trim()) {
+		throw new Error('YouTube handle lookup returned an invalid channel identity');
+	}
+	return item.id;
 }

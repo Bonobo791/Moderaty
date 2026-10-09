@@ -347,7 +347,7 @@ test('scores tone with empty context when a comment has no video ID', async () =
 test('a protected handle is approved without rules, scoring, or enforcement — identity beats text', async () => {
 	// A ban rule matches the comment text, but the protected handle decides
 	// first: no rule decision, no AI call, no YouTube enforcement.
-	protectHandle('author'); // newComment's default authorName is 'Author'
+	protectHandle('protected_handle'); // bound to authorChannelId, not the display name
 	mocks.state.ruleRows = [{ id: 1, channelId: 'channel', type: 'keyword', pattern: 'toxic', action: 'ban' }];
 	mocks.fetchNewComments.mockResolvedValue({
 		comments: [newComment({ text: 'this is toxic' })],
@@ -397,10 +397,10 @@ test('only the protected identity is exempt — the same toxic text still bans a
 	expect(result).toMatchObject({ fetched: 2, acted: 1, queued: 0 });
 });
 
-test('an @-prefixed, mixed-case author name matches the normalized stored handle', async () => {
+test('changing the display name does not change verified identity protection', async () => {
 	protectHandle('some.user');
 	mocks.fetchNewComments.mockResolvedValue({
-		comments: [newComment({ authorName: '@Some.User' })],
+		comments: [newComment({ authorName: 'Completely Different Name' })],
 		nextPageToken: null,
 		reachedCursor: true
 	});

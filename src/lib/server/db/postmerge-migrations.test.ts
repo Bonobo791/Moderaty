@@ -27,7 +27,7 @@ function migrationFolder(entries: Entry[]) {
 async function database() {
 	const client = createClient({ url: 'file::memory:' });
 	clients.push(client);
-	await client.executeMultiple("CREATE TABLE channels (id TEXT PRIMARY KEY); CREATE TABLE comments (id TEXT PRIMARY KEY, channel_id TEXT NOT NULL DEFAULT 'channel', status TEXT NOT NULL); INSERT INTO comments (id, status) VALUES ('legacy', 'restoring');");
+	await client.executeMultiple("CREATE TABLE channels (id TEXT PRIMARY KEY); CREATE TABLE channel_allowed_handles (id INTEGER PRIMARY KEY, channel_id TEXT NOT NULL, handle TEXT NOT NULL, created_at TEXT NOT NULL); CREATE TABLE comments (id TEXT PRIMARY KEY, channel_id TEXT NOT NULL DEFAULT 'channel', status TEXT NOT NULL); INSERT INTO comments (id, status) VALUES ('legacy', 'restoring');");
 	return client;
 }
 

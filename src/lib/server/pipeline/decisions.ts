@@ -1,4 +1,4 @@
-import { normalizeHandle } from '$lib/server/allowlist';
+import type { ProtectedIdentities } from '$lib/server/allowlist';
 import { DeadlineExceededError } from '$lib/server/http';
 import { detectJailbreak } from '$lib/server/jailbreak';
 import { scoreComment, serializeScores } from '$lib/server/moderation';
@@ -61,7 +61,7 @@ function errorText(_error: unknown): string {
 export function metadataUnavailable(
 	comment: NewComment,
 	rules: PreparedRule[],
-	allowlist: Set<string>,
+	allowlist: ProtectedIdentities,
 	error: unknown
 ): Decision {
 	return preAiDecision(comment, rules, allowlist) ?? aiUnavailable(comment, error);
@@ -188,12 +188,13 @@ async function aiDecision(
  * Allowlist and rule outcomes, decided BEFORE any AI budget is touched.
  * Returns null when neither applies, so decide() can fall through to AI.
  */
-function preAiDecision(comment: NewComment, rules: PreparedRule[], allowlist: Set<string>): Decision | null {
+function preAiDecision(comment: NewComment, rules: PreparedRule[], allowlist: ProtectedIdentities): Decision | null {
 	// Protected handles skip rules and scoring by design: identity beats text,
 	// so even a matching ban rule loses to the allowlist.
-	if (allowlist.has(normalizeHandle(comment.authorName))) {
+	const protectedHandle = allowlist.byChannelId.get(comment.authorChannelId);
+	if (protectedHandle) {
 		return {
-			comment,
+			comment: { ...comment, authorHandle: protectedHandle },
 			status: 'approved',
 			decidedBy: 'allowlist',
 			matchedRuleId: null,
@@ -201,6 +202,20 @@ function preAiDecision(comment: NewComment, rules: PreparedRule[], allowlist: Se
 			auditAction: 'approve',
 			reason: 'protected handle',
 			youtubeAction: null
+		};
+	}
+	// Legacy entries cannot identify their protected author. Hold for review
+	// until the owner resolves them; never fall back to a display-name guess.
+	if (allowlist.unresolved || (allowlist.configured && !comment.authorChannelId)) {
+		return {
+			comment,
+			status: 'pending',
+			decidedBy: 'none',
+			matchedRuleId: null,
+			aiScore: null,
+			auditAction: 'queue',
+			reason: 'protected identity unresolved',
+			youtubeAction: 'hold'
 		};
 	}
 	const rule = matchPreparedRule(comment.text, comment.authorChannelId, rules);
@@ -211,7 +226,7 @@ function preAiDecision(comment: NewComment, rules: PreparedRule[], allowlist: Se
 export async function decide(
 	comment: NewComment,
 	rules: PreparedRule[],
-	allowlist: Set<string>,
+	allowlist: ProtectedIdentities,
 	tone: { context: ToneContext } | null,
 	aiBudget: AiBudget,
 	options: AiOptions

@@ -4,8 +4,11 @@ import { validateRule } from '$lib/server/rules';
 import {
 	addHandle as addAllowedHandle,
 	listHandles,
+	validateHandle,
 	removeHandle as removeAllowedHandle
 } from '$lib/server/allowlist';
+import { decrypt } from '$lib/server/crypto';
+import { refreshAccessToken, resolveHandleChannelId } from '$lib/server/youtube';
 import { ownedChannel } from '$lib/server/ownership';
 import { and, eq } from 'drizzle-orm';
 import { fail } from '@sveltejs/kit';
@@ -59,10 +62,14 @@ export const actions = {
 		return { ok: true };
 	},
 	addHandle: async ({ params, request, locals }) => {
-		await ownedChannel(params.id, locals);
+		const channel = await ownedChannel(params.id, locals);
 		const f = await request.formData();
 		try {
-			await addAllowedHandle(params.id, String(f.get('handle') ?? ''));
+			const handle = validateHandle(String(f.get('handle') ?? ''));
+			await addAllowedHandle(params.id, handle, async () => {
+				const token = await refreshAccessToken(decrypt(channel.refreshTokenEnc));
+				return resolveHandleChannelId(handle, token);
+			});
 		} catch (e) {
 			return fail(400, { error: e instanceof Error ? e.message : String(e) });
 		}

@@ -14,27 +14,32 @@ import errorPage from './error.html?raw';
 
 type Event = Parameters<Handle>[0]['event'];
 
+function cacheResponse(response: Response, event: Event): Response {
+	const etag = response.headers.get('etag');
+	const clientTag = event.request?.headers.get('if-none-match')?.replace(/^W\/(?=")/, '');
+	if (response.status !== 200 || etag === null || clientTag !== etag) return response;
+	const cacheHeaders = new Set(['etag', 'cache-control', 'content-location', 'date', 'expires', 'vary', 'set-cookie']);
+	const headers = new Headers(Array.from(response.headers).filter(([key]) => cacheHeaders.has(key)));
+	// Preserve separate Set-Cookie fields rather than a comma-joined value.
+	headers.delete('set-cookie');
+	for (const cookie of response.headers.getSetCookie()) headers.append('set-cookie', cookie);
+	return new Response(null, { status: 304, headers });
+}
+
+function dataRedirectResponse(response: Response, event: Event): Response {
+	if (!event.isDataRequest || response.status < 300 || response.status > 308) return response;
+	const location = response.headers.get('location');
+	if (!location) return response;
+	const headers = new Headers(response.headers);
+	for (const key of ['location', 'content-type', 'content-length', 'content-encoding', 'etag']) headers.delete(key);
+	headers.set('cache-control', 'private, no-store');
+	return json({ type: 'redirect', location }, { headers });
+}
+
 function correlate(response: Response, event: Event): Response {
 	// These conversions otherwise happen after handle() and discard custom
 	// headers. Preserve the same cache/redirect outcome before adding ours.
-	const etag = response.headers.get('etag');
-	const clientTag = event.request?.headers.get('if-none-match')?.replace(/^W\/(?=")/, '');
-	if (response.status === 200 && etag !== null && clientTag === etag) {
-		const cacheHeaders = ['etag', 'cache-control', 'content-location', 'date', 'expires', 'vary', 'set-cookie'];
-		const headers = new Headers(Array.from(response.headers).filter(([key]) => cacheHeaders.includes(key)));
-		// Preserve separate Set-Cookie fields rather than a comma-joined value.
-		headers.delete('set-cookie');
-		for (const cookie of response.headers.getSetCookie()) headers.append('set-cookie', cookie);
-		response = new Response(null, { status: 304, headers });
-	} else if (event.isDataRequest && response.status >= 300 && response.status <= 308) {
-		const location = response.headers.get('location');
-		if (location) {
-			const headers = new Headers(response.headers);
-			for (const key of ['location', 'content-type', 'content-length', 'content-encoding', 'etag']) headers.delete(key);
-			headers.set('cache-control', 'private, no-store');
-			response = json({ type: 'redirect', location }, { headers });
-		}
-	}
+	response = dataRedirectResponse(cacheResponse(response, event), event);
 	const headers = new Headers(response.headers);
 	headers.set('X-Request-ID', event.locals.requestId);
 	if (isNoIndexRoute(event.route.id)) headers.set('X-Robots-Tag', 'noindex');
@@ -48,7 +53,10 @@ function wantsJson(event: Event): boolean {
 		const media = mediaValue.trim();
 		const qualityParameter = parameters.find((value) => value.trim().startsWith('q='));
 		const quality = qualityParameter ? Number(qualityParameter.trim().slice(2)) : 1;
-		return { media, quality, order, specificity: media === '*/*' ? 0 : media.endsWith('/*') ? 1 : 2 };
+		let specificity = 2;
+		if (media === '*/*') specificity = 0;
+		else if (media.endsWith('/*')) specificity = 1;
+		return { media, quality, order, specificity };
 	}).filter(({ quality }) => Number.isFinite(quality) && quality > 0 && quality <= 1)
 		.toSorted((a, b) => b.quality - a.quality || b.specificity - a.specificity || a.order - b.order);
 	for (const { media } of ranges) {
@@ -65,12 +73,12 @@ export const handle: Handle = async (input) => {
 	event.locals.requestId = randomUUID();
 	try {
 		return correlate(await handleRequest(input), event);
-	} catch (failure) {
-		if (isRedirect(failure)) {
-			return correlate(new Response(null, { status: failure.status, headers: { location: failure.location } }), event);
+	} catch (error_) {
+		if (isRedirect(error_)) {
+			return correlate(new Response(null, { status: error_.status, headers: { location: error_.location } }), event);
 		}
-		const status = isHttpError(failure) ? failure.status : 500;
-		const body = isHttpError(failure) ? failure.body : await handleError({ error: failure, event, status, message: 'Internal Error' }) ?? { message: 'Internal Error' };
+		const status = isHttpError(error_) ? error_.status : 500;
+		const body = isHttpError(error_) ? error_.body : await handleError({ error: error_, event, status, message: 'Internal Error' }) ?? { message: 'Internal Error' };
 		if (wantsJson(event)) {
 			return correlate(json(body, { status }), event);
 		}

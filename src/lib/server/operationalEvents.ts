@@ -72,28 +72,34 @@ function loggingFailed() {
 	}
 }
 
+function safePattern(value: unknown, pattern: RegExp): string | null {
+	return typeof value === 'string' && pattern.test(value) ? value : null;
+}
+
+function validatedEvent(event: OperationalEvent) {
+	// Read once before validation: accessors must not change a checked value.
+	const { type, severity, category, route, requestId } = event;
+	const identity = env;
+	const environment = identity.MODERATY_ENVIRONMENT ?? identity.NODE_ENV;
+	const release = identity.MODERATY_RELEASE;
+	return {
+		version: 1,
+		type: allowed(type, TYPES, 'unexpected_server_error'),
+		severity: allowed(severity, SEVERITIES, 'error'),
+		category: allowed(category, CATEGORIES, 'unknown'),
+		route: typeof route === 'string' && ROUTES.has(route) ? route : null,
+		requestId: safePattern(requestId, UUID),
+		environment: allowed(environment, [...ENVIRONMENTS, 'unknown'], 'unknown'),
+		release: safePattern(release, RELEASE)
+	};
+}
+
 /** Fixed schema: never serialize errors, spread callers, or stringify unknown values. */
 export function emitOperationalEvent(event: OperationalEvent): void {
 	try {
-		// Read once before validation: accessors must not change a checked value.
-		const { type, severity, category, route, requestId } = event;
-		const identity = env;
-		const environment = identity.MODERATY_ENVIRONMENT ?? identity.NODE_ENV;
-		const release = identity.MODERATY_RELEASE;
-		const line = JSON.stringify({
-			version: 1,
-			type: allowed(type, TYPES, 'unexpected_server_error'),
-			severity: allowed(severity, SEVERITIES, 'error'),
-			category: allowed(category, CATEGORIES, 'unknown'),
-			route: typeof route === 'string' && ROUTES.has(route) ? route : null,
-			requestId: typeof requestId === 'string' && UUID.test(requestId) ? requestId : null,
-			environment: allowed(environment, [...ENVIRONMENTS, 'unknown'], 'unknown'),
-			release: typeof release === 'string' && RELEASE.test(release) ? release : null
-		});
-		const channel = allowed(severity, SEVERITIES, 'error');
-		console[channel === 'info' ? 'info' : channel === 'warn' ? 'warn' : 'error'](line);
+		const record = validatedEvent(event);
+		console[record.severity](JSON.stringify(record));
 	} catch {
 		loggingFailed();
 	}
 }
-

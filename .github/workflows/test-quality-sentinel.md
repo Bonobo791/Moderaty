@@ -43,6 +43,15 @@ steps:
       ref: ${{ github.event.pull_request.base.sha }}
       fetch-depth: 0
       persist-credentials: false
+  - name: Check out pinned evidence collector
+    uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+    with:
+      repository: Bonobo791/Moderaty
+      ref: 1732d13e76d674d138b2a957a940aa616c5f0a17
+      path: .sentinel-collector
+      sparse-checkout: scripts/test-quality-context.mjs
+      sparse-checkout-cone-mode: false
+      persist-credentials: false
   - name: Set up evidence runtime
     uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
     with:
@@ -68,7 +77,7 @@ steps:
         exit 1
       fi
       mkdir -p /tmp/gh-aw/agent
-      node scripts/test-quality-context.mjs
+      node .sentinel-collector/scripts/test-quality-context.mjs
 ---
 
 # Test Quality Sentinel

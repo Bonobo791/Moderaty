@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { env } from '$env/dynamic/private';
 
 // Fail closed: only framework route templates reviewed here can enter logs.
@@ -47,7 +48,7 @@ const ROUTES = new Set([
 ]);
 const TYPES = ['migration_check_failed', 'session_lookup_failed', 'unexpected_server_error', 'request_disconnected', 'request_not_found'] as const;
 const SEVERITIES = ['info', 'warn', 'error'] as const;
-const CATEGORIES = ['database', 'unexpected', 'client_disconnect', 'not_found', 'unknown'] as const;
+const CATEGORIES = ['database', 'deployment', 'integrity', 'unexpected', 'client_disconnect', 'not_found', 'unknown'] as const;
 const ENVIRONMENTS = ['development', 'test', 'staging', 'production'] as const;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const RELEASE = /^(?:[0-9a-f]{7,40}|v?\d{1,4}\.\d{1,4}\.\d{1,4})$/;
@@ -58,6 +59,7 @@ export type OperationalEvent = {
 	category: typeof CATEGORIES[number];
 	route: string | null;
 	requestId: string | undefined;
+	diagnosticError?: unknown;
 };
 
 function allowed<T extends string>(value: unknown, values: readonly T[], fallback: T): T {
@@ -80,9 +82,28 @@ function safeRelease(value: unknown): string | null {
 	return typeof value === 'string' && RELEASE.test(value) ? value : null;
 }
 
+// Only fixed built-in names and an opaque grouping key enter the log. Neither
+// provider messages, custom names, causes nor stack text are serialized.
+function safeDiagnostics(error: unknown) {
+	let errorKind = 'unknown';
+	let errorFingerprint: string | null = null;
+	try {
+		const classes = [TypeError, RangeError, ReferenceError, SyntaxError, URIError, EvalError, AggregateError, Error];
+		errorKind = classes.find((kind) => error instanceof kind)?.name ?? 'unknown';
+		const stack = error instanceof Error ? error.stack : undefined;
+		if (typeof stack === 'string' && stack.length <= 65_536) {
+			const frames = stack.split('\n').filter((line) => line.trimStart().startsWith('at ')).slice(0, 8).join('\n');
+			if (frames) errorFingerprint = createHash('sha256').update(frames).digest('hex');
+		}
+	} catch {
+		// Hostile accessors/proxies must not prevent the original event.
+	}
+	return { errorKind, errorFingerprint };
+}
+
 function validatedEvent(event: OperationalEvent) {
 	// Read once before validation: accessors must not change a checked value.
-	const { type, severity, category, route, requestId } = event;
+	const { type, severity, category, route, requestId, diagnosticError } = event;
 	const identity = env;
 	const environment = identity.MODERATY_ENVIRONMENT ?? identity.NODE_ENV;
 	const release = identity.MODERATY_RELEASE;
@@ -94,7 +115,8 @@ function validatedEvent(event: OperationalEvent) {
 		route: typeof route === 'string' && ROUTES.has(route) ? route : null,
 		requestId: safeRequestId(requestId),
 		environment: allowed(environment, [...ENVIRONMENTS, 'unknown'], 'unknown'),
-		release: safeRelease(release)
+		release: safeRelease(release),
+		...(diagnosticError === undefined ? {} : safeDiagnostics(diagnosticError))
 	};
 }
 

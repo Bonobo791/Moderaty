@@ -466,7 +466,7 @@ test('a client that disconnects mid-request logs a warn line, not a fake 500', a
 test('a real unexpected error emits a loud safe category instead of the raw stack', async () => {
 	const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 	const err = vi.spyOn(console, 'error').mockImplementation(() => {});
-	const boom = new Error('db exploded');
+	const boom = new TypeError('db exploded');
 
 	const result = await handleError({
 		error: boom,
@@ -476,6 +476,7 @@ test('a real unexpected error emits a loud safe category instead of the raw stac
 	});
 
 	expect(JSON.parse(err.mock.calls[0][0])).toMatchObject({ type: 'unexpected_server_error', severity: 'error', category: 'unexpected', route: '/(app)/channels/[id]/feedback' });
+	expect(JSON.parse(err.mock.calls[0][0])).toMatchObject({ errorKind: 'TypeError', errorFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/) });
 	expect(JSON.stringify(err.mock.calls)).not.toContain(boom.message);
 	expect(warn).not.toHaveBeenCalled();
 	expect(result).toEqual({ message: 'Internal Error' });
@@ -597,7 +598,7 @@ test.each([['migration', 503], ['session', 500]])('deliberate %s failures retain
 	expect(errorLog).toHaveBeenCalledTimes(1);
 	expect(JSON.parse(errorLog.mock.calls[0][0])).toMatchObject({
 		type: boundary === 'migration' ? 'migration_check_failed' : 'session_lookup_failed',
-		severity: 'error', category: 'database', route: '/(app)/dashboard',
+		severity: 'error', category: boundary === 'migration' ? 'deployment' : 'integrity', route: '/(app)/dashboard',
 		requestId: response.headers.get('x-request-id')
 	});
 	expect(JSON.stringify(errorLog.mock.calls)).not.toContain('Controlled failure');

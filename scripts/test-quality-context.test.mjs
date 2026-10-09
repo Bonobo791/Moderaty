@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { afterEach, expect, test } from 'vitest';
@@ -88,4 +88,43 @@ test('reads wildcard filenames literally without mixing in a second test diff', 
 	const literal = result.tests.find((entry) => entry.path === 'src/[ab].test.ts');
 	expect(literal.diff).toContain('literal after');
 	expect(literal.diff).not.toContain('other after');
+});
+
+
+test('the introduction workflow runs its pinned collector even when the base has no collector', () => {
+	const workflow = readFileSync(new URL('../.github/workflows/test-quality-sentinel.md', import.meta.url), 'utf8');
+	const collectorCheckout = workflow.match(/- name: Check out pinned evidence collector[\s\S]*?(?=  - name:)/)?.[0];
+	expect(collectorCheckout).toMatch(/ref: [a-f0-9]{40}/);
+	expect(collectorCheckout).toContain('path: .sentinel-collector');
+	expect(collectorCheckout).toContain('persist-credentials: false');
+	const command = workflow.match(/^      node (.+)$/m)?.[1];
+	expect(command).toBe('.sentinel-collector/scripts/test-quality-context.mjs');
+	const f = fixture({ 'src/a.test.ts': 'before\n' }, { 'src/a.test.ts': 'throw new Error("DO NOT EXECUTE");\n' });
+	f.git('checkout', '--quiet', f.base);
+	mkdirSync(join(f.repo, '.sentinel-collector/scripts'), { recursive: true });
+	writeFileSync(join(f.repo, command), readFileSync(new URL('./test-quality-context.mjs', import.meta.url)));
+	const output = join(f.repo, 'context.json');
+	execFileSync(process.execPath, [command], { cwd: f.repo, env: { ...process.env, PR_BASE_SHA: f.base, PR_HEAD_SHA: f.head, SENTINEL_CONTEXT_PATH: output } });
+	expect(JSON.parse(readFileSync(output, 'utf8')).tests[0].after).toContain('DO NOT EXECUTE');
+});
+
+
+test('a candidate-controlled PATH cannot replace the Git executable', () => {
+	const f = fixture({ 'src/a.test.ts': 'before\n' }, { 'src/a.test.ts': 'after\n' });
+	const fake = join(f.repo, 'git');
+	writeFileSync(fake, '#!/bin/sh\nexit 42\n');
+	chmodSync(fake, 0o755);
+	const previous = process.env.PATH;
+	process.env.PATH = `${f.repo}:${previous}`;
+	try {
+		expect(collectContext(f).tests[0].after).toBe('after\n');
+	} finally {
+		process.env.PATH = previous;
+	}
+});
+
+test('retains package and nested runner configuration as control evidence', () => {
+	const paths = ['package.json', 'package-lock.json', 'nested/vitest.config.ts', 'vite.config.ts', 'playwright.config.mjs', 'stryker.config.json', 'nested/tsconfig.json'];
+	const f = fixture(Object.fromEntries(paths.map((path) => [path, 'before\n'])), Object.fromEntries(paths.map((path) => [path, 'after\n'])));
+	expect(collectContext(f).controls.map(({ path }) => path).sort()).toEqual(paths.sort());
 });

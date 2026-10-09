@@ -30,7 +30,9 @@ failure reports are disabled. All action references are immutable SHAs and
 container images have digests. The main Copilot CLI version is pinned to
 `1.0.87`. The framework's secondary detection engine is compiler-managed.
 
-The collector executes from the event's trusted base SHA, fetches the PR head
+The collector is checked out separately at the reviewed immutable commit
+`1732d13e76d674d138b2a957a940aa616c5f0a17`. The evidence repository stays
+at the event's base SHA. The collector fetches the PR head
 as Git data, verifies the fetched SHA and compares from the merge base. It never
 checks out, imports or runs candidate files. Credentials are not persisted by
 checkout or by the fetch invocation. The agent's default checkout and file
@@ -45,11 +47,11 @@ requires checking for a moved PR head before publishing a verdict.
 
 ## Activation and maintenance
 
-The collector must first exist on the target branch. The initial introduction
-PR cannot run this base-only collector if its base lacks the file; it fails
-loudly rather than executing the proposed collector with credentials. After
-the human integrates it, subsequent PRs can run normally. Nothing in this
-change modifies repository security settings or activates a workflow remotely.
+The pinned collector allows the introduction PR to run even when its target
+branch does not contain the collector yet. Updating the executable collector
+requires reviewing and publishing its commit first, then updating the workflow's
+pin. PR changes to the collector are evidence only until that explicit update.
+Nothing here modifies repository security settings.
 
 Compile with the reviewed `gh-aw` v0.89.21 binary:
 

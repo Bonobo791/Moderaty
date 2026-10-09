@@ -70,3 +70,37 @@ test('both output and stderr failures stay contained', () => {
 	expect(() => emitOperationalEvent({ type: 'session_lookup_failed', severity: 'error', category: 'database', route: '/', requestId })).not.toThrow();
 	expect(stderr).toHaveBeenCalledWith('operational logging failed\n');
 });
+
+
+test('diagnostics distinguish error classes and call sites without revealing messages or stack text', () => {
+	const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+	const send = (message: string, site: number) => {
+		const failure = new TypeError(message);
+		failure.stack = `${message}\n    at work (/private/synthetic-private-value.ts:${site}:9)`;
+		emitOperationalEvent({ type: 'unexpected_server_error', severity: 'error', category: 'unexpected', route: '/', requestId, diagnosticError: failure } as never);
+		return JSON.parse(log.mock.calls.at(-1)![0]);
+	};
+	const first = send('synthetic-private-value', 1);
+	const sameSite = send('a different private message', 1);
+	const otherSite = send('synthetic-private-value', 2);
+	expect(first.errorKind).toBe('TypeError');
+	expect(first.errorFingerprint).toMatch(/^[a-f0-9]{64}$/);
+	expect(sameSite.errorFingerprint).toBe(first.errorFingerprint);
+	expect(otherSite.errorFingerprint).not.toBe(first.errorFingerprint);
+	expect(JSON.stringify(log.mock.calls)).not.toContain('synthetic-private-value');
+	expect(JSON.stringify(log.mock.calls)).not.toContain('a different private message');
+});
+
+test('hostile diagnostic metadata stays contained and oversized stacks are not processed', () => {
+	const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+	const hostile = Object.defineProperty(new Error(), 'stack', { get() { throw new Error('synthetic-private-value'); } });
+	for (const diagnosticError of [hostile, new Proxy({}, { getPrototypeOf() { throw new Error('synthetic-private-value'); } })]) {
+		expect(() => emitOperationalEvent({ type: 'unexpected_server_error', severity: 'error', category: 'unexpected', route: '/', requestId, diagnosticError } as never)).not.toThrow();
+		expect(JSON.parse(log.mock.calls.at(-1)![0]).errorFingerprint).toBeNull();
+	}
+	const oversized = new Error();
+	oversized.stack = 'at '.repeat(30_000);
+	emitOperationalEvent({ type: 'unexpected_server_error', severity: 'error', category: 'unexpected', route: '/', requestId, diagnosticError: oversized } as never);
+	expect(JSON.parse(log.mock.calls.at(-1)![0]).errorFingerprint).toBeNull();
+	expect(JSON.stringify(log.mock.calls)).not.toContain('synthetic-private-value');
+});

@@ -114,8 +114,6 @@ const storedIds =
 // Stryker restore ArrayDeclaration
 const existingIds = new Set(storedIds);
 const rulesForChannel = prepareRules(await db.select().from(rules).where(eq(rules.channelId, channelId)).all());
-// One allowlist read per run; decide() checks it before any rule or scoring.
-const allowlist = await loadProtectedIdentities(channelId, db, handle => resolveHandleChannelId(handle, options.accessToken, options.deadline));
 // Dedupe three ways: against already-stored comments, within this batch,
 // and against comments this scan already staged (the scan_id marker). The
 // last keeps a parked rescan page from re-scoring finished work every tick;
@@ -130,6 +128,11 @@ const newComments = page.comments.filter((comment) => {
 	seen.add(comment.id);
 	return true;
 });
+// Idle/already-staged pages need configuration only. Pending destructive
+// actions independently resolve protection in enforcement when necessary.
+const allowlist = await loadProtectedIdentities(channelId, db, newComments.length
+	? handle => resolveHandleChannelId(handle, options.accessToken, options.deadline)
+	: undefined);
 const handles = await fetchAuthorHandles(newComments.map(comment => comment.authorChannelId), options.accessToken, options.deadline);
 for (const comment of newComments) comment.authorHandle = handles.get(comment.authorChannelId) ?? null;
 // A ticked protection flag forces the tone pass on even below

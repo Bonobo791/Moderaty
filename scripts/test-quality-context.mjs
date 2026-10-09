@@ -9,7 +9,7 @@ const CONTROL_NAMES = new Set(['package.json', 'package-lock.json']);
 const CONTROL_PREFIXES = ['vitest', 'vite.config.', 'playwright.config.', 'stryker', 'tsconfig'];
 function isControl(path) {
 	const filename = path.split('/').at(-1);
-	return path.startsWith('.github/workflows/') || CONTROL_NAMES.has(filename) ||
+	return path.startsWith('.github/workflows/') || (path.startsWith('e2e/') && !TEST.test(path)) || CONTROL_NAMES.has(filename) ||
 		CONTROL_PREFIXES.some((prefix) => filename.startsWith(prefix));
 }
 

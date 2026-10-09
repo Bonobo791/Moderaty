@@ -6,6 +6,7 @@ import { channels } from '$lib/server/db/schema';
 import { DeadlineExceededError } from '$lib/server/http';
 import { channelMatchesClaim } from '$lib/server/dryRun';
 import { resolveOpenAiKey } from '$lib/server/openaiKey';
+import type { ProtectedIdentities } from '$lib/server/allowlist';
 import { TONE_LEVEL_OMNI_ONLY } from '$lib/toneLevels';
 import { fetchNewComments, refreshAccessToken, type CommentPage } from '$lib/server/youtube';
 import { assertChannelActive, ChannelDeactivatedError, runEnforcement } from './enforcement';
@@ -158,7 +159,7 @@ const decideAndStage = async (
 		window: RunChannelOptions['window'];
 		rescan: { chargeScope: string | null; scanStamp: string } | undefined;
 	}
-): Promise<{ acted: number; queued: number; skipped: number; deferred: number; stagedCount: number }> => {
+): Promise<{ acted: number; queued: number; skipped: number; deferred: number; stagedCount: number; protection: ProtectedIdentities }> => {
 	const { channel, accessToken, deadline, dryRun, window, rescan } = ctx;
 	const { decisions, failures, deferred, protectedIds, protection } = await decideNewComments(channelId, page, {
 		accessToken,
@@ -197,7 +198,7 @@ const decideAndStage = async (
 	if (failures.length) {
 		throw new Error(`moderation decision failed for ${failures.length} comment(s): ${failures.join('; ')}`);
 	}
-	return { acted, queued, skipped: fetched - stagedCount - failures.length - deferred, deferred, stagedCount };
+	return { acted, queued, skipped: fetched - stagedCount - failures.length - deferred, deferred, stagedCount, protection };
 };
 
 export async function runChannel(
@@ -254,7 +255,7 @@ export async function runChannel(
 			return finishDryRun(window, page, { fetched, acted, queued });
 		}
 
-		const enforcement = await runEnforcement(channelId, accessToken, deadline, channel.orgId, deferred, channel);
+		const enforcement = await runEnforcement(channelId, accessToken, deadline, channel.orgId, deferred, channel, staged.protection);
 		acted = enforcement.acted;
 		if (enforcement.outOfCredits) {
 			console.warn(

@@ -80,9 +80,20 @@ test('retains added, deleted and renamed Playwright cases and Netlify production
 test('CI requires the real browser regression and its type check', () => {
 	const workflow = readFileSync(new URL('../.github/workflows/checks.yml', import.meta.url), 'utf8');
 	expect(workflow).toContain('run: npm run check:e2e');
-	expect(workflow).toContain('run: npx playwright install --with-deps chromium');
+	expect(workflow).toContain('run: node node_modules/playwright/cli.js install --with-deps chromium');
 	expect(workflow).toContain('run: npm run test:e2e');
 	expect(workflow).not.toContain('continue-on-error');
+});
+
+test('retains added, deleted and renamed browser support code as control evidence', () => {
+	const f = fixture({'e2e/support/server.mjs':'server before\n', 'e2e/support/old.mjs':'provider before\n', 'e2e/support/deleted.sql':'schema before\n'},
+		{'e2e/support/server.mjs':'server after\n', 'e2e/support/old.mjs':null, 'e2e/support/renamed.mjs':'provider before\n', 'e2e/support/deleted.sql':null, 'e2e/support/fixture.ts':'throw new Error("DO NOT EXECUTE");\n'});
+	const result = collectContext(f);
+	expect(result.controls.map(({path}) => path).sort()).toEqual(['e2e/support/deleted.sql','e2e/support/fixture.ts','e2e/support/renamed.mjs','e2e/support/server.mjs']);
+	expect(result.controls.find(({path}) => path.endsWith('server.mjs'))).toMatchObject({before:'server before\n', after:'server after\n', diff:expect.stringContaining('+server after')});
+	expect(result.controls.find(({path}) => path.endsWith('deleted.sql'))).toMatchObject({before:'schema before\n', after:null});
+	expect(result.controls.find(({path}) => path.endsWith('renamed.mjs'))).toMatchObject({previousPath:'e2e/support/old.mjs', before:'provider before\n', after:'provider before\n'});
+	expect(result.controls.find(({path}) => path.endsWith('fixture.ts')).after).toContain('DO NOT EXECUTE');
 });
 
 test('fails loudly for invalid refs and oversized evidence instead of reporting a clean review', () => {

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
 import { maybeTriggerAutoTopUp } from '$lib/server/billing/autotopup';
-import { loadProtectedIdentities } from '$lib/server/allowlist';
+import { loadProtectedIdentities, type ProtectedIdentities } from '$lib/server/allowlist';
 import { hasHumanClaim } from './human-claims';
 import { db } from '$lib/server/db';
 import { auditLog, channels, comments, moderationActions } from '$lib/server/db/schema';
@@ -503,11 +503,11 @@ async function applyModerationBatch(
 
 /** Revalidate pending destructive intents against current protection before claiming them.
  * Provider IDs are fetched outside the transaction and discarded after this sweep. */
-async function guardPendingProtection(actions: OutstandingAction[], accessToken: string, deadline: number | undefined, expected?: ChannelIdentity): Promise<OutstandingAction[]> {
+async function guardPendingProtection(actions: OutstandingAction[], accessToken: string, deadline: number | undefined, expected?: ChannelIdentity, previous?: ProtectedIdentities): Promise<OutstandingAction[]> {
 	const pending = actions.filter(action => action.state === 'pending' && action.action !== 'hold');
 	if (!pending.length) return actions;
 	const channelId = pending[0].channelId;
-	const snapshot = await loadProtectedIdentities(channelId, db, handle => resolveHandleChannelId(handle, accessToken, deadline));
+	const snapshot = await loadProtectedIdentities(channelId, db, handle => resolveHandleChannelId(handle, accessToken, deadline), previous);
 	const authors = snapshot.configured ? await fetchCommentAuthorIds(pending.map(action => action.commentId), accessToken, deadline) : new Map<string,string>();
 	return db.transaction(async transaction => {
 		await assertChannelActive(channelId, transaction, expected);
@@ -565,7 +565,7 @@ async function applyDeletes(actions: OutstandingAction[], accessToken: string, d
 	return acted;
 }
 
-async function processOutstandingActions(channelId: string, accessToken: string, deadline?: number, expected?: ChannelIdentity): Promise<number> {
+async function processOutstandingActions(channelId: string, accessToken: string, deadline?: number, expected?: ChannelIdentity, protection?: ProtectedIdentities): Promise<number> {
 	const actions = (await db
 		.select()
 		.from(moderationActions)
@@ -598,7 +598,7 @@ async function processOutstandingActions(channelId: string, accessToken: string,
 	const releasable = cancelling.filter((action) => convergedCancels.has(action.commentId));
 	await transitionActions(releasable, { state: 'superseded' }, expected, ['cancelling']);
 	// Stryker disable next-line MethodExpression, ConditionalExpression: equivalent — claimPendingActions' SQL still guards eq(state, 'pending'), so handing it dispatched rows too claims nothing extra
-	const guarded = await guardPendingProtection(actions.filter(action => !restoring.has(action.commentId)), accessToken, deadline, expected);
+	const guarded = await guardPendingProtection(actions.filter(action => !restoring.has(action.commentId)), accessToken, deadline, expected, protection);
 	const claimed = await claimPendingActions(guarded.filter((action) => action.state === 'pending' && !restoring.has(action.commentId)), expected);
 	// Stryker disable next-line ArrayDeclaration: equivalent — applyYoutubeActions selects entries by their action field, so a foreign element in the array is never selected
 	const ready: OutstandingAction[] = [];
@@ -911,11 +911,12 @@ export async function runEnforcement(
 	deadline: number | undefined,
 	orgId: string | null | undefined,
 	deferred: number,
-	expected?: ChannelIdentity
+	expected?: ChannelIdentity,
+	protection?: ProtectedIdentities
 ): Promise<{ acted: number; outOfCredits: boolean }> {
 	// ... and again before any YouTube enforcement call.
 	await assertChannelActive(channelId, db, expected);
-	const acted = await processOutstandingActions(channelId, accessToken, deadline, expected);
+	const acted = await processOutstandingActions(channelId, accessToken, deadline, expected, protection);
 	await reconcileRestoring(channelId, accessToken, deadline, expected);
 	if (orgId) {
 		await assertChannelActive(channelId, db, expected);

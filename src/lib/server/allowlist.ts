@@ -1,10 +1,10 @@
-// Per-channel protected-handle allowlist: comments from a listed handle are
-// always approved, skipping rules and AI scoring (identity beats text).
+// Per-channel protected handles bind to verified YouTube channel identities.
+// Protected identities skip rules and AI scoring (identity beats text).
 
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 
 import { db } from '$lib/server/db';
-import { channelAllowedHandles } from '$lib/server/db/schema';
+import { channelAllowedHandles, channels } from '$lib/server/db/schema';
 
 export const MAX_HANDLES_PER_CHANNEL = 100;
 
@@ -39,9 +39,11 @@ export function validateHandle(raw: string): string {
 	return handle;
 }
 
+type HandleReader = Pick<typeof db, 'select'>;
+
 /** All protected handles for a channel, newest first. */
-export async function listHandles(channelId: string) {
-	return db
+export async function listHandles(channelId: string, reader: HandleReader = db) {
+	return reader
 		.select()
 		.from(channelAllowedHandles)
 		.where(eq(channelAllowedHandles.channelId, channelId))
@@ -49,29 +51,69 @@ export async function listHandles(channelId: string) {
 		.all();
 }
 
+type ChannelConnection = Pick<typeof channels.$inferSelect, 'orgId' | 'refreshTokenEnc'>;
+
 /**
  * Adds a handle to a channel's allowlist: validate, enforce the per-channel
- * cap, dedupe. Re-adding an already-protected handle returns the existing row
- * without error (idempotent add). The cap is checked before the dedupe, so at
- * capacity even a duplicate add is rejected loudly.
+ * cap, dedupe. A resolver verifies new UI entries before any write. Verified
+ * duplicates keep their original identity. Legacy entries can be resolved
+ * in place, including at capacity; adds at capacity remain rejected.
  */
-export async function addHandle(channelId: string, raw: string) {
+export async function addHandle(
+	channelId: string,
+	raw: string,
+	resolve?: () => Promise<string>,
+	connection?: ChannelConnection
+) {
 	const handle = validateHandle(raw);
 	const existing = await db
 		.select()
 		.from(channelAllowedHandles)
 		.where(eq(channelAllowedHandles.channelId, channelId))
 		.all();
-	if (existing.length >= MAX_HANDLES_PER_CHANNEL) {
+	const duplicate = existing.find((row) => row.handle === handle);
+	if (existing.length >= MAX_HANDLES_PER_CHANNEL && !(duplicate && !duplicate.resolvedChannelId && resolve)) {
 		throw new Error(`channel already has the maximum of ${MAX_HANDLES_PER_CHANNEL} protected handles`);
 	}
-	const duplicate = existing.find((row) => row.handle === handle);
-	if (duplicate) return duplicate;
-	const inserted = await db
-		.insert(channelAllowedHandles)
-		.values({ channelId, handle, createdAt: new Date().toISOString() })
-		.returning();
-	return inserted[0];
+	if (duplicate?.resolvedChannelId || (duplicate && !resolve)) return duplicate;
+	const resolvedChannelId = resolve ? await resolve() : null;
+	// Network work is complete. Lock and recheck before any durable write.
+	return db.transaction(async (tx) => {
+		if (connection) {
+			const connected = await tx.update(channels)
+				.set({ id: sql`${channels.id}` })
+				.where(and(
+					eq(channels.id, channelId),
+					connection.orgId === null ? isNull(channels.orgId) : eq(channels.orgId, connection.orgId),
+					eq(channels.refreshTokenEnc, connection.refreshTokenEnc)
+				))
+				.returning({ id: channels.id });
+			if (!connected[0]) throw new Error('channel connection changed during handle verification');
+		} else {
+			// Legacy configuration callers also lock before reading capacity.
+			await tx.update(channelAllowedHandles).set({ id: sql`${channelAllowedHandles.id}` })
+				.where(eq(channelAllowedHandles.channelId, channelId));
+		}
+		const current = await tx.select().from(channelAllowedHandles)
+			.where(eq(channelAllowedHandles.channelId, channelId)).all();
+		const sameHandle = current.find(row => row.handle === handle);
+		if (duplicate && sameHandle?.id !== duplicate.id) {
+			throw new Error('protected handle was removed during resolution');
+		}
+		if (current.length >= MAX_HANDLES_PER_CHANNEL && !(sameHandle && !sameHandle.resolvedChannelId && resolve)) {
+			throw new Error(`channel already has the maximum of ${MAX_HANDLES_PER_CHANNEL} protected handles`);
+		}
+		if (sameHandle) {
+			if (sameHandle.resolvedChannelId || !resolve) return sameHandle;
+			const updated = await tx.update(channelAllowedHandles).set({ resolvedChannelId })
+				.where(and(eq(channelAllowedHandles.id, sameHandle.id), eq(channelAllowedHandles.channelId, channelId)))
+				.returning();
+			return updated[0];
+		}
+		const inserted = await tx.insert(channelAllowedHandles)
+			.values({ channelId, handle, resolvedChannelId, createdAt: new Date().toISOString() }).returning();
+		return inserted[0];
+	});
 }
 
 /**
@@ -88,7 +130,7 @@ export async function removeHandle(channelId: string, id: number) {
 	return deleted[0] ?? null;
 }
 
-/** The pipeline seam: all normalized protected handles for a channel as a Set. */
+/** Handle labels for callers that need configuration rather than identity matching. */
 export async function loadHandleSet(channelId: string): Promise<Set<string>> {
 	const rows = await db
 		.select({ handle: channelAllowedHandles.handle })
@@ -96,4 +138,26 @@ export async function loadHandleSet(channelId: string): Promise<Set<string>> {
 		.where(eq(channelAllowedHandles.channelId, channelId))
 		.all();
 	return new Set(rows.map((row) => row.handle));
+}
+
+export interface ProtectedIdentities {
+	byChannelId: Map<string, string>;
+	unresolved: boolean;
+	configured: boolean;
+}
+
+/** Names are labels; only verified channel IDs can grant protection. */
+export async function loadProtectedIdentities(channelId: string, reader: HandleReader = db): Promise<ProtectedIdentities> {
+	const rows = await listHandles(channelId, reader);
+	const byChannelId = new Map<string, string>();
+	for (const row of rows) {
+		if (row.resolvedChannelId && !byChannelId.has(row.resolvedChannelId)) {
+			byChannelId.set(row.resolvedChannelId, row.handle);
+		}
+	}
+	return {
+		byChannelId,
+		unresolved: rows.some((row) => !row.resolvedChannelId),
+		configured: rows.length > 0
+	};
 }

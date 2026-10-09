@@ -648,7 +648,7 @@ export function runWindowPage({
 }
 
 export function protectHandle(handle: string) {
-	mocks.state.handleRows = [{ id: 1, channelId: 'channel', handle, createdAt: '2026-01-01T00:00:00.000Z' }];
+	mocks.state.handleRows = [{ id: 1, channelId: 'channel', handle, resolvedChannelId: 'author', createdAt: '2026-01-01T00:00:00.000Z' }];
 }
 
 export function expectActionState(state: string) {

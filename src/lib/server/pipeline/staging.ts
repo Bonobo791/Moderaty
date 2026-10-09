@@ -1,5 +1,6 @@
 import { and, eq, inArray, sql } from 'drizzle-orm';
-import { normalizeHandle } from '$lib/server/allowlist';
+import { loadProtectedIdentities } from '$lib/server/allowlist';
+import { protectedDecision } from './decisions';
 import { commentChargeRef, consumeCreditsBulk, type LedgerHandle } from '$lib/server/billing/ledger';
 import { db } from '$lib/server/db';
 import { auditLog, comments, moderationActions } from '$lib/server/db/schema';
@@ -21,12 +22,8 @@ export function auditRows(channelId: string, decisions: Decision[], dryRun: bool
 			Boolean(decision.auditAction && decision.reason)
 		)
 		.map((decision) => {
-			// The commenter's normalized handle — the same normalization the
-			// allowlist compares against, so a log row reads exactly like a
-			// protected-handles entry. normalizeHandle never throws, but a
-			// blank/lone-'@' author name trims to '' — store NULL in that case:
-			// a handle is either meaningful or absent, never an empty string.
-			const authorHandle = normalizeHandle(decision.comment.authorName) || null;
+			// Display names are not handles. Store only a verified configured handle.
+			const authorHandle = decision.comment.authorHandle || null;
 			return {
 				channelId,
 				commentId: decision.comment.id,
@@ -71,11 +68,7 @@ function actionRows(channelId: string, decisions: Decision[]) {
 			channelId,
 			action: decision.youtubeAction,
 			reason: decision.reason,
-			// The normalized handle rides the staged row so the completion audit
-			// row (written later by completeActions, long after the comment's
-			// in-memory author data is gone) can still say WHO was moderated.
-			// Same contract as auditRows: NULL when the name normalizes to ''.
-			authorHandle: normalizeHandle(decision.comment.authorName) || null,
+			authorHandle: decision.comment.authorHandle || null,
 			state: 'pending',
 			lastAttemptAt: null,
 			lastManualRetryAt: null,
@@ -278,8 +271,17 @@ export async function stageDecisions(channelId: string, decisions: Decision[], o
 		// and the inserts.
 		await assertChannelActive(channelId, transaction, options.expected);
 		const handle = transaction as LedgerHandle;
+		// Verification and staging lock the same channel row. A protection that
+		// committed during scoring must take precedence over the stale verdict.
+		const protection = await loadProtectedIdentities(channelId, transaction);
+		const refreshedDecisions = decisions.map(decision => {
+			const protectedOutcome = protectedDecision(decision.comment, protection);
+			// The AI call already consumed budget even if protection changes its
+			// verdict. Preserve that fact for atomic, idempotent ledger charging.
+			return protectedOutcome ? { ...protectedOutcome, billable: decision.billable } : decision;
+		});
 		const committedDecisions = options.rescan
-			? await preserveRescanHumanClaims(handle, channelId, decisions, options.rescan.scanStamp, options.protectedIds) : decisions;
+			? await preserveRescanHumanClaims(handle, channelId, refreshedDecisions, options.rescan.scanStamp, options.protectedIds) : refreshedDecisions;
 		if (!committedDecisions.length) return decisionCounts(committedDecisions);
 		if (options.rescan) {
 			await upsertRescannedCommentRows(handle, channelId, committedDecisions, options.rescan.scanStamp);

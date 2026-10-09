@@ -25,11 +25,11 @@ vi.mock('$lib/server/youtube', () => ({
 }));
 
 import { countDbStatements, setupTestDb, testDb } from '../testdb';
-import { auditLog, channels, comments, creditTransactions, moderationActions, organizations } from '../db/schema';
+import { auditLog, channelAllowedHandles, channels, comments, creditTransactions, moderationActions, organizations } from '../db/schema';
 import { stageDecisions, stageOrAuditDecisions } from './staging';
 import type { Decision } from './types';
 
-setupTestDb(['audit_log', 'moderation_actions', 'comments', 'channels', 'credit_transactions', 'organizations']);
+setupTestDb(['audit_log', 'moderation_actions', 'comments', 'channels', 'credit_transactions', 'organizations', 'channel_allowed_handles']);
 
 const IDENTITY = { userId: 'user-1', refreshTokenEnc: 'enc' };
 
@@ -260,10 +260,10 @@ test('300 billable decisions stage with a statement count independent of batch s
 	const large = await countDbStatements(testDb().db, () => stageDecisions('UC1', holdBatch(300, 'large'), { orgId: 'org-1', expected: IDENTITY }));
 	expect(small.value).toEqual({ acted: 3, queued: 3, stagedCount: 3 });
 	expect(large.value).toEqual({ acted: 300, queued: 300, stagedCount: 300 });
-	// 10 statements: the metered classification now rides on the org row the
-	// charge transaction already reads (codeant) — the extra orgIsMetered
-	// select outside the tx is gone.
-	expect(small.count).toBe(10);
+	// 11 statements: one channel-scoped protection read inside the staging
+	// transaction prevents a stale scoring snapshot from creating ban intent.
+	// The read is per batch, never per comment; bulk billing remains constant.
+	expect(small.count).toBe(11);
 	expect(large.count).toBe(small.count);
 	expect(await testDb().db.select().from(comments).all()).toHaveLength(303);
 	expect(await testDb().db.select().from(creditTransactions).all()).toHaveLength(303);
@@ -281,4 +281,33 @@ test('a staging shortfall reports the first uncharged comment and rolls back the
 	expect(await testDb().db.select().from(moderationActions).all()).toHaveLength(0);
 	expect(await testDb().db.select().from(creditTransactions).all()).toHaveLength(0);
 	expect(await orgBalance()).toBe(2);
+});
+
+
+test.each(['verified', 'unresolved'])('a %s protection override charges the AI call exactly once on rescan retries', async (kind) => {
+	await seedChannelAndOrg(10);
+	await testDb().db.insert(channelAllowedHandles).values({ channelId: 'UC1', handle: 'protected_handle', resolvedChannelId: kind === 'verified' ? 'a1' : null });
+	const staleAi = holdDecision();
+	const options = { orgId: 'org-1', expected: IDENTITY, rescan: { chargeScope: 'protection-race' } };
+	await stageDecisions('UC1', [staleAi], options);
+	const ledger = await testDb().db.select().from(creditTransactions).all();
+	expect(ledger).toEqual([expect.objectContaining({ refType: 'comment', refId: 'c1#protection-race', delta: -1, balanceAfter: 9 })]);
+	expect(await orgBalance()).toBe(9);
+	expect((await testDb().db.select().from(comments).get())?.decidedBy).toBe(kind === 'verified' ? 'allowlist' : 'none');
+	const actions = await testDb().db.select().from(moderationActions).all();
+	expect(actions).toEqual(kind === 'verified' ? [] : [expect.objectContaining({ action: 'hold' })]);
+	await stageDecisions('UC1', [staleAi], options);
+	expect(await testDb().db.select().from(creditTransactions).all()).toHaveLength(1);
+	expect(await orgBalance()).toBe(9);
+});
+
+test('a protection override cannot stage a consumed AI call free on an exhausted balance', async () => {
+	await seedChannelAndOrg(0);
+	await testDb().db.insert(channelAllowedHandles).values({ channelId: 'UC1', handle: 'protected_handle', resolvedChannelId: 'a1' });
+	await expect(stageDecisions('UC1', [holdDecision()], { orgId: 'org-1', expected: IDENTITY })).rejects.toThrow('credit charge failed for comment c1');
+	expect(await testDb().db.select().from(comments).all()).toEqual([]);
+	expect(await testDb().db.select().from(auditLog).all()).toEqual([]);
+	expect(await testDb().db.select().from(moderationActions).all()).toEqual([]);
+	expect(await testDb().db.select().from(creditTransactions).all()).toEqual([]);
+	expect(await orgBalance()).toBe(0);
 });

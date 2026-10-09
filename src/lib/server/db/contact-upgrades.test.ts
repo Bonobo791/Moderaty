@@ -39,6 +39,8 @@ test.each([58, 60])('upgrades the synthetic base at %i through the real journal 
 			CREATE TABLE contact_submissions (id INTEGER PRIMARY KEY, email TEXT NOT NULL, name TEXT NOT NULL, status TEXT NOT NULL, verification_token TEXT NOT NULL, expires_at TEXT NOT NULL, verified_at TEXT, consent_text TEXT NOT NULL, ip TEXT NOT NULL, user_agent TEXT NOT NULL, created_at TEXT NOT NULL);
 			CREATE TABLE comments (id TEXT PRIMARY KEY, channel_id TEXT NOT NULL, status TEXT NOT NULL);
 			CREATE TABLE channels (id TEXT PRIMARY KEY);
+			CREATE TABLE channel_allowed_handles (id INTEGER PRIMARY KEY, channel_id TEXT NOT NULL, handle TEXT NOT NULL, created_at TEXT NOT NULL);
+			INSERT INTO channel_allowed_handles VALUES (1, 'channel', 'legacy_handle', '2026-10-01T00:00:00Z');
 			INSERT INTO comments VALUES ('legacy-comment', 'channel', 'restoring');
 			INSERT INTO feedback_digests VALUES (1, 'dry-run-pending', 'preserve pending'), (2, 'completed', 'preserve completed');
 			INSERT INTO contact_submissions VALUES (1, 'pending@example.com', 'Pending', 'pending', 'pending-token', '2026-10-10T00:00:00.000Z', NULL, 'original consent', '127.0.0.1', 'synthetic', '2026-10-01T00:00:00.000Z');
@@ -52,6 +54,7 @@ test.each([58, 60])('upgrades the synthetic base at %i through the real journal 
 			await client.execute({ sql: 'INSERT INTO __drizzle_migrations (hash, created_at) VALUES (?, ?)', args: [hash(sqlFile(entry.tag)), entry.when] });
 		}
 		await migrate(drizzle(client), { migrationsFolder: folder });
+		expect((await client.execute('SELECT handle, resolved_channel_id FROM channel_allowed_handles')).rows).toEqual([{ handle: 'legacy_handle', resolved_channel_id: null }]);
 		expect((await client.execute('SELECT id, status, restore_intent_id FROM comments')).rows).toEqual([
 			{ id: 'legacy-comment', status: 'restoring', restore_intent_id: null }
 		]);

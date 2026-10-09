@@ -61,7 +61,7 @@ test('a dry run counts the protected comment as implicit approved and audits the
 	expect(result).toMatchObject({ fetched: 1, acted: 0, queued: 0, dryRun: true });
 	expect(mocks.state.insertedComments).toEqual([]);
 	expect(mocks.state.insertedAudits).toEqual([
-		expect.objectContaining({ commentId: 'comment', action: 'dry-run', reason: 'protected handle', text: 'this is toxic' })
+		expect.objectContaining({ commentId: 'comment', action: 'dry-run', reason: 'protected handle', authorHandle: 'author', text: 'this is toxic' })
 	]);
 	expect(mocks.db.transaction).toHaveBeenCalledTimes(1);
 	expect(mocks.scoreComment).not.toHaveBeenCalled();
@@ -73,13 +73,8 @@ test.each([
 	// A queued comment writes TWO rows carrying the handle: 'queue' at staging
 	// (why it waits) and 'hold' at enforcement completion (the remote action).
 	{ score: 0.6, audit: 'queue', count: 2 }
-])('an auto-action ($audit) audit row carries the comment author’s normalized handle', async ({ score, audit, count }) => {
-	// The audit row records WHO was moderated, normalized exactly the way the
-	// allowlist stores handles: lowercase, trimmed, one leading '@' stripped.
-	// (Rows for decisions WITH a YouTube action — ban/reject/delete/hold — are
-	// written later by completeActions from moderation_actions, where no author
-	// data survives; the dry-run test below covers the ban path through
-	// auditRows.)
+])('an auto-action ($audit) never treats an @-prefixed display name as a handle', async ({ score, audit, count }) => {
+	// YouTube comments supply display names, not verified handles.
 	mocks.scoreComment.mockResolvedValue(moderation(score));
 	mocks.fetchNewComments.mockResolvedValue({
 		comments: [newComment({ authorName: '@Some.User' })],
@@ -91,26 +86,22 @@ test.each([
 
 	expect(mocks.state.insertedAudits).toHaveLength(count);
 	expect(mocks.state.insertedAudits).toEqual(expect.arrayContaining([
-		expect.objectContaining({ commentId: 'comment', action: audit, authorHandle: 'some.user' })
+		expect.objectContaining({ commentId: 'comment', action: audit, authorHandle: null })
 	]));
 	if (audit === 'queue') {
-		// Pin the completion row too: the staged 'hold' carries the handle
-		// through moderation_actions — a dropped field or a wrong action on
-		// the second row must fail this test, not hide behind the count.
+		// The completion audit preserves NULL through the staged action.
 		expect(mocks.state.insertedAudits).toContainEqual(expect.objectContaining({
 			commentId: 'comment',
 			action: 'hold',
 			actor: 'system',
-			authorHandle: 'some.user',
+			authorHandle: null,
 			reason: expect.any(String)
 		}));
 	}
 });
 
-test('a dry-run audit row carries the normalized handle alongside the capped text', async () => {
-	// Ban-intent score: the dry run writes EVERY decision through auditRows,
-	// so even ban rows carry the handle. The handle is a separate field — the
-	// ≤500-char text contract is untouched.
+test('a dry-run audit row keeps an unverified handle null alongside the capped text', async () => {
+	// Even a handle-shaped display name cannot become a stored handle.
 	mocks.state.env.DRY_RUN = 'false';
 	mocks.scoreComment.mockResolvedValue(moderation(0.95));
 	const text = `comment ${'x'.repeat(600)}`;
@@ -126,15 +117,14 @@ test('a dry-run audit row carries the normalized handle alongside the capped tex
 		expect.objectContaining({
 			commentId: 'comment',
 			action: 'dry-run',
-			authorHandle: 'mixed.case',
+			authorHandle: null,
 			text: text.slice(0, 500)
 		})
 	]);
 });
 
-test('an author name that normalizes to empty stores authorHandle null, not an empty string', async () => {
-	// normalizeHandle('@') trims to ''. A blank handle is meaningless, so the
-	// audit row stores NULL — a handle is either meaningful or absent.
+test('a blank display name leaves the unavailable handle null', async () => {
+	// '@' is a display name, not a verified handle.
 	mocks.scoreComment.mockResolvedValue(moderation(0.34));
 	mocks.fetchNewComments.mockResolvedValue({
 		comments: [newComment({ authorName: '@' })],
@@ -150,10 +140,8 @@ test('an author name that normalizes to empty stores authorHandle null, not an e
 	expect(mocks.state.insertedAudits[0].authorHandle).toBeNull();
 });
 
-test('a real-run enforcement decision stages its normalized handle, and the completion audit row carries it', async () => {
-	// The ban path skips auditRows at staging: its audit row is written later
-	// by completeActions from the moderation_actions row, so the normalized
-	// handle must ride the staged action row to reach the log.
+test('real enforcement keeps an unverified handle null in staged actions and completion audits', async () => {
+	// The completion audit reads the action row after in-memory identity is gone.
 	mocks.state.ruleRows = [{ id: 1, channelId: 'channel', type: 'keyword', pattern: 'toxic', action: 'ban' }];
 	mocks.fetchNewComments.mockResolvedValue({
 		comments: [newComment({ authorName: '@Some.User', text: 'this is toxic' })],
@@ -164,17 +152,16 @@ test('a real-run enforcement decision stages its normalized handle, and the comp
 	const result = await runChannel('channel');
 
 	expect(mocks.state.moderationActions).toEqual([
-		expect.objectContaining({ commentId: 'comment', action: 'ban', state: 'completed', authorHandle: 'some.user' })
+		expect.objectContaining({ commentId: 'comment', action: 'ban', state: 'completed', authorHandle: null })
 	]);
 	expect(mocks.state.insertedAudits).toEqual([
-		expect.objectContaining({ commentId: 'comment', action: 'ban', authorHandle: 'some.user' })
+		expect.objectContaining({ commentId: 'comment', action: 'ban', authorHandle: null })
 	]);
 	expect(result).toMatchObject({ acted: 1, queued: 0 });
 });
 
-test('a staged action whose handle normalized to empty completes with authorHandle null, not an empty string', async () => {
-	// normalizeHandle('@') trims to '', which staging stores as NULL; the
-	// completion audit row must carry NULL through, never ''.
+test('a display name of @ cannot produce a handle on a completed action', async () => {
+	// Display-name formatting cannot invent an author handle.
 	mocks.state.ruleRows = [{ id: 1, channelId: 'channel', type: 'keyword', pattern: 'toxic', action: 'ban' }];
 	mocks.fetchNewComments.mockResolvedValue({
 		comments: [newComment({ authorName: '@', text: 'this is toxic' })],

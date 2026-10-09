@@ -1,5 +1,5 @@
 import { and, eq, inArray } from 'drizzle-orm';
-import { loadHandleSet } from '$lib/server/allowlist';
+import { loadProtectedIdentities } from '$lib/server/allowlist';
 import { getCredits, orgIsMetered } from '$lib/server/billing/ledger';
 import { db } from '$lib/server/db';
 import { comments, rules } from '$lib/server/db/schema';
@@ -65,7 +65,7 @@ export async function prepareDecisionBatch(
 ): Promise<{
 	newComments: Array<CommentPage['comments'][number]>;
 	rulesForChannel: ReturnType<typeof prepareRules>;
-	allowlist: Awaited<ReturnType<typeof loadHandleSet>>;
+	allowlist: Awaited<ReturnType<typeof loadProtectedIdentities>>;
 	aiBudget: AiBudget;
 	videoContext: Awaited<ReturnType<typeof fetchVideoMetadata>> | null;
 	metadataError: unknown;
@@ -115,7 +115,7 @@ const storedIds =
 const existingIds = new Set(storedIds);
 const rulesForChannel = prepareRules(await db.select().from(rules).where(eq(rules.channelId, channelId)).all());
 // One allowlist read per run; decide() checks it before any rule or scoring.
-const allowlist = await loadHandleSet(channelId);
+const allowlist = await loadProtectedIdentities(channelId);
 // Dedupe three ways: against already-stored comments, within this batch,
 // and against comments this scan already staged (the scan_id marker). The
 // last keeps a parked rescan page from re-scoring finished work every tick;
@@ -147,7 +147,7 @@ export async function scoreComments(
 	newComments: Array<CommentPage['comments'][number]>,
 	options: {
 		rulesForChannel: ReturnType<typeof prepareRules>;
-		allowlist: Awaited<ReturnType<typeof loadHandleSet>>;
+		allowlist: Awaited<ReturnType<typeof loadProtectedIdentities>>;
 		aiBudget: AiBudget;
 		videoContext: Awaited<ReturnType<typeof fetchVideoMetadata>> | null;
 		metadataError: unknown;

@@ -393,7 +393,7 @@ export async function resolveHandleChannelId(handle: string, accessToken: string
 	const response = await ytFetch(`/channels?${params}`, accessToken);
 	if (!response.ok) throw new Error('YouTube handle lookup unavailable; protection was not changed');
 	const payload = object(await response.json(), 'YouTube handle lookup response');
-	const items: unknown = payload.items ?? [];
+	const items: unknown = payload.items;
 	if (!Array.isArray(items)) throw new Error('YouTube handle lookup returned malformed data');
 	if (items.length === 0) throw new HandleNotFoundError();
 	if (items.length !== 1) throw new Error('YouTube handle must resolve to exactly one channel');

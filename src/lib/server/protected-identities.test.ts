@@ -34,3 +34,11 @@ test('protection configured on another owner channel does not affect this channe
 	await testDb().db.insert(channelAllowedHandles).values({ channelId: 'other-owner', handle: 'protected_handle', resolvedChannelId: 'verified-author' });
 	expect(await decision()).toMatchObject({ youtubeAction: 'ban' });
 });
+
+test('the newest configured handle labels an identity shared by two entries', async () => {
+	await testDb().db.insert(channelAllowedHandles).values([
+		{ channelId: 'owner', handle: 'old_handle', resolvedChannelId: 'verified-author' },
+		{ channelId: 'owner', handle: 'new_handle', resolvedChannelId: 'verified-author' }
+	]);
+	expect(await decision()).toMatchObject({ comment: { authorHandle: 'new_handle' } });
+});

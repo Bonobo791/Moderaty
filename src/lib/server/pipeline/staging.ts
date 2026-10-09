@@ -1,4 +1,6 @@
 import { and, eq, inArray, sql } from 'drizzle-orm';
+import { loadProtectedIdentities } from '$lib/server/allowlist';
+import { protectedDecision } from './decisions';
 import { commentChargeRef, consumeCreditsBulk, type LedgerHandle } from '$lib/server/billing/ledger';
 import { db } from '$lib/server/db';
 import { auditLog, comments, moderationActions } from '$lib/server/db/schema';
@@ -269,8 +271,12 @@ export async function stageDecisions(channelId: string, decisions: Decision[], o
 		// and the inserts.
 		await assertChannelActive(channelId, transaction, options.expected);
 		const handle = transaction as LedgerHandle;
+		// Verification and staging lock the same channel row. A protection that
+		// committed during scoring must take precedence over the stale verdict.
+		const protection = await loadProtectedIdentities(channelId, transaction);
+		const refreshedDecisions = decisions.map(decision => protectedDecision(decision.comment, protection) ?? decision);
 		const committedDecisions = options.rescan
-			? await preserveRescanHumanClaims(handle, channelId, decisions, options.rescan.scanStamp, options.protectedIds) : decisions;
+			? await preserveRescanHumanClaims(handle, channelId, refreshedDecisions, options.rescan.scanStamp, options.protectedIds) : refreshedDecisions;
 		if (!committedDecisions.length) return decisionCounts(committedDecisions);
 		if (options.rescan) {
 			await upsertRescannedCommentRows(handle, channelId, committedDecisions, options.rescan.scanStamp);

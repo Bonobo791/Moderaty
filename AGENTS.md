@@ -220,6 +220,7 @@ import it into client code); `drizzle-kit`,
 `fast-check` (dev — property-based testing, maintainer-approved; the
 `@fast-check/vitest` connector stays optional, plain `fc.assert` in vitest
 tests is the house style).
+`@playwright/test` (dev — maintainer-approved for the protected-handle real-browser regression, 2026-10-09; exact version pinned in package.json).
 No auth libraries, no googleapis SDK, no direct OpenAI SDK, no CSS
 frameworks, no direct zod dependency. UI copy uses the brand **Moderaty** — the string `yt-mod`
 must not appear in `src/`.

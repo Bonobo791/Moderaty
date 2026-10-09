@@ -39,9 +39,11 @@ export function validateHandle(raw: string): string {
 	return handle;
 }
 
+type HandleReader = Pick<typeof db, 'select'>;
+
 /** All protected handles for a channel, newest first. */
-export async function listHandles(channelId: string) {
-	return db
+export async function listHandles(channelId: string, reader: HandleReader = db) {
+	return reader
 		.select()
 		.from(channelAllowedHandles)
 		.where(eq(channelAllowedHandles.channelId, channelId))
@@ -145,10 +147,16 @@ export interface ProtectedIdentities {
 }
 
 /** Names are labels; only verified channel IDs can grant protection. */
-export async function loadProtectedIdentities(channelId: string): Promise<ProtectedIdentities> {
-	const rows = await listHandles(channelId);
+export async function loadProtectedIdentities(channelId: string, reader: HandleReader = db): Promise<ProtectedIdentities> {
+	const rows = await listHandles(channelId, reader);
+	const byChannelId = new Map<string, string>();
+	for (const row of rows) {
+		if (row.resolvedChannelId && !byChannelId.has(row.resolvedChannelId)) {
+			byChannelId.set(row.resolvedChannelId, row.handle);
+		}
+	}
 	return {
-		byChannelId: new Map(rows.filter((row) => row.resolvedChannelId).map((row) => [row.resolvedChannelId!, row.handle])),
+		byChannelId,
 		unresolved: rows.some((row) => !row.resolvedChannelId),
 		configured: rows.length > 0
 	};

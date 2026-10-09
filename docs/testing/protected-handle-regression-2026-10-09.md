@@ -73,3 +73,96 @@ Codacy's six SQL findings apply PostgreSQL/SQL Server checks to SQLite fixture D
 CodeRabbit's requested draft review was rate-limited, and cubic reported its monthly review limit. Those unavailable reviews are not evidence of correctness. Existing CI validation jobs passed on the published commit; they do not run the opt-in Playwright command. Review fixes are validated locally before publication approval.
 
 Review-fix verification: 207 files / 4,058 Vitest tests passed, plus Svelte check (zero errors/warnings), E2E type check, production build and Chromium browser regression. Nine reproducing tests failed before their corresponding fixes; 17 added tests cover fixes and malformed-response boundaries. No fixes have been published at this checkpoint.
+
+
+## Second review: validated defects and remaining design decision
+
+Review of published head `b86abc0` reproduced five failing assertions before
+three local fixes: two stale-protection staging cases, one newest-label case,
+and two malformed lookup cases. The staging transaction now reads the current
+protection under the same channel write lock used by UI verification and applies
+that outcome before inserting comment/action rows. A real-libSQL regression
+scores both authors as rule bans, commits a new protection, and verifies the
+protected author is approved while the unprotected control still stages,
+dispatches, and completes its ban through the real enforcement code. Only the
+external HTTP response is stubbed. New unresolved protection sends stale
+negative decisions to review rather than a destructive action.
+
+Multiple configured handles for one identity now use the newest configured
+label. Missing/null `items` now remain malformed-response failures; only an
+actual empty array means not found. This supersedes the earlier missing-items
+review disposition. Reference: Google's channels.list response contract,
+updated 2026-09-14: https://developers.google.com/youtube/v3/docs/channels/list.
+Malformed-input cases remain tested under the corrected expected failure type.
+
+The additional protection read is one statement per batch. The existing bulk
+staging test still checks identical query counts for 3 versus 300 comments,
+all 303 comment rows, all 303 credit transactions, and exact outcomes. Its exact
+statement count now records 11 including the necessary security read instead
+of 10. No coverage, mutation, discovery or CI threshold changed.
+
+Playwright's existing exact dev-dependency pin is authorized by the owner's
+explicit Playwright request and design approvals; that approval is now recorded
+in AGENTS.md.
+
+### Open privacy and handle-log findings
+
+The stored browser evidence proves both findings: the protected configuration
+contains `resolvedChannelId: UCsynthetic_protected_author` although the owner
+entered only `@protected_creator`; the ordinary control's completed ban audit
+contains `authorHandle: null`. The current privacy/FAQ/DPA promise permits only
+owner-entered configuration identifiers, and describes ordinary verified handles
+in the activity log with 30-day/on-demand erasure. These are remaining shipping
+blockers, not dismissed reviewer suggestions. No legal text, consent version,
+retention policy, production database or applied migration was changed.
+
+Proposed privacy-preserving redesign, for owner decision:
+
+1. Persist only the entered protected handle. Resolve handles to authoritative
+   channel IDs per run, keep the mapping in memory, and hold ambiguous identities
+   for review. Use bounded external calls and the run's existing deadline.
+2. Resolve ordinary author IDs in bounded channels.list batches to authoritative
+   snippet.customUrl @handles. Retain only verified handles through the existing
+   TTL/erasure flow. Never use display names as handles, and discard IDs and names.
+3. Guard configuration changes at staging; keep the ban-positive control and
+   add real-browser persistence assertions that forbid resolved IDs in storage.
+4. Reconcile nullable schema changes using new migrations only; do not edit
+   applied migrations or claim a persisted ID is anonymous because it is hashed.
+
+This changes the earlier approved account binding: protection would follow the
+current holder of the entered @handle and would require a configuration update
+when that handle changes. Keeping protection bound to the original account
+instead would require a separately approved configuration/retention disclosure
+and consent design. That choice has not been made in this review, so neither
+semantic changes nor legal changes were implemented silently. This regression
+still covers newly scored actions, not a protection added after action staging
+or an already-dispatched request.
+
+### Check and bot dispositions
+
+Both CI validation jobs, CodeQL, Semgrep and Sonar passed on `b86abc0`; this is
+not an all-checks-green claim. The Sentinel agent failed before inference because
+its trusted checkout is `dev` at `769b0e6`, which lacks
+`scripts/test-quality-context.mjs`. Its final conclusion job succeeds despite
+that failed agent. That independent workflow belongs to another task/session;
+this branch does not copy missing Sentinel files or weaken its checks.
+
+All 13 current Codacy annotations were inspected: six SQL Server/PostgreSQL
+checks target the SQLite fixture; seven length/complexity advisories do not
+reproduce a functional defect. The three Sonar annotations are the existing
+standalone-SQL literal, fixture re-export and fetch complexity advisories.
+CodeAnt's new race, label and malformed-response findings are fixed locally.
+Its green/risk/diagram/status and marketing comments do not replace testing.
+Gitar reports its original findings closed; the missing-items behavior above
+is nonetheless corrected using the current provider contract. CodeRabbit skips
+the nondefault target and its earlier requested review was rate-limited; cubic
+has exhausted its quota. Amazon Q's prior approval includes a >30-file caveat.
+No unavailable review is counted as completed validation.
+
+Second-review local validation: 208 Vitest files / 4,061 tests passed, Svelte
+check reported zero errors and warnings, E2E type check and production build
+passed, and the Chromium regression passed with its real positive control.
+The strengthened staging race test additionally completes the control's remote
+ban through the external synthetic HTTP boundary. Five assertions were seen
+failing before fixes. The two privacy/design findings remain open even though
+the implemented fixes validate green. No new fixes have been published.

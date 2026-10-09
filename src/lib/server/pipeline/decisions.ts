@@ -185,10 +185,10 @@ async function aiDecision(
  * @returns The moderation decision for the comment
  */
 /**
- * Allowlist and rule outcomes, decided BEFORE any AI budget is touched.
- * Returns null when neither applies, so decide() can fall through to AI.
+ * Protection outcome, shared by scoring and the final staging transaction.
+ * Returns null when the current configuration does not protect this author.
  */
-function preAiDecision(comment: NewComment, rules: PreparedRule[], allowlist: ProtectedIdentities): Decision | null {
+export function protectedDecision(comment: NewComment, allowlist: ProtectedIdentities): Decision | null {
 	// Protected handles skip rules and scoring by design: identity beats text,
 	// so even a matching ban rule loses to the allowlist.
 	const protectedHandle = allowlist.byChannelId.get(comment.authorChannelId);
@@ -218,6 +218,12 @@ function preAiDecision(comment: NewComment, rules: PreparedRule[], allowlist: Pr
 			youtubeAction: 'hold'
 		};
 	}
+	return null;
+}
+
+function preAiDecision(comment: NewComment, rules: PreparedRule[], allowlist: ProtectedIdentities): Decision | null {
+	const protection = protectedDecision(comment, allowlist);
+	if (protection) return protection;
 	const rule = matchPreparedRule(comment.text, comment.authorChannelId, rules);
 	if (rule) return ruleDecision(comment, rule);
 	return null;

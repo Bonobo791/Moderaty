@@ -731,12 +731,12 @@ test('handle lookup rejects provider failure', async () => {
 	await expect(resolveHandleChannelId('protected_handle', 'token')).rejects.toThrow('lookup unavailable');
 });
 
-test.each([{}, { items: [] }, { items: null }])('handle lookup distinguishes zero results from malformed data: %j', async (payload) => {
+test.each([{ items: [] }])('handle lookup distinguishes zero results from malformed data: %j', async (payload) => {
 	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json(payload)));
 	await expect(resolveHandleChannelId('unknown_handle', 'token')).rejects.toThrow('No YouTube channel uses this handle');
 });
 
-test.each([null, [], { items: 0 }, { items: {} }, { items: [null] }, { items: [{ id: ' ' }] }])('handle lookup still rejects malformed responses: %j', async (payload) => {
+test.each([{}, { items: null }, null, [], { items: 0 }, { items: {} }, { items: [null] }, { items: [{ id: ' ' }] }])('handle lookup still rejects malformed responses: %j', async (payload) => {
 	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json(payload)));
 	const error = await resolveHandleChannelId('unknown_handle', 'token').catch(error => error);
 	expect(error).toBeInstanceOf(Error);

@@ -260,10 +260,10 @@ test('300 billable decisions stage with a statement count independent of batch s
 	const large = await countDbStatements(testDb().db, () => stageDecisions('UC1', holdBatch(300, 'large'), { orgId: 'org-1', expected: IDENTITY }));
 	expect(small.value).toEqual({ acted: 3, queued: 3, stagedCount: 3 });
 	expect(large.value).toEqual({ acted: 300, queued: 300, stagedCount: 300 });
-	// 10 statements: the metered classification now rides on the org row the
-	// charge transaction already reads (codeant) — the extra orgIsMetered
-	// select outside the tx is gone.
-	expect(small.count).toBe(10);
+	// 11 statements: one channel-scoped protection read inside the staging
+	// transaction prevents a stale scoring snapshot from creating ban intent.
+	// The read is per batch, never per comment; bulk billing remains constant.
+	expect(small.count).toBe(11);
 	expect(large.count).toBe(small.count);
 	expect(await testDb().db.select().from(comments).all()).toHaveLength(303);
 	expect(await testDb().db.select().from(creditTransactions).all()).toHaveLength(303);

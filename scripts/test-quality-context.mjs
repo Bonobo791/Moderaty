@@ -21,8 +21,8 @@ export function collectContext({ repo = process.cwd(), base, head, maxBytes = 2_
 		cwd: repo, encoding: 'utf8', maxBuffer: 8_000_000,
 		env: { ...process.env, PATH: '/usr/bin:/bin' }
 	});
-	git('cat-file', '-e', `${base}^{commit}`);
-	git('cat-file', '-e', `${head}^{commit}`);
+	git('cat-file', '-e', base + '^{commit}');
+	git('cat-file', '-e', head + '^{commit}');
 	const mergeBase = git('merge-base', base, head).trim();
 	const fields = git('diff', '--no-ext-diff', '--no-textconv', '--name-status', '-z', '-M', mergeBase, head).split('\0');
 	const changed = [];

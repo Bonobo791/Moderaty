@@ -58,8 +58,7 @@ Nothing here modifies repository security settings.
 Compile with the reviewed `gh-aw` v0.89.21 binary:
 
 ```sh
-gh aw compile test-quality-sentinel --strict --action-mode release \
-  --action-tag c35393777e5604a63721d09512263b1383301d4f --no-check-update
+node scripts/compile-test-quality-sentinel.mjs /path/to/gh-aw
 ```
 
 Linux binary SHA-256:
@@ -67,6 +66,11 @@ Linux binary SHA-256:
 Commit both Markdown and generated YAML. Inlining enables full prompt hashing
 in the framework's stale-lock check. Review action/container changes on each
 compiler upgrade; never hand-edit generated YAML.
+
+The wrapper verifies the compiler checksum, uses the pinned strict compilation
+options, then normalizes the generated gateway mask to a literal `printf`
+command. Masking stays enabled. Unexpected masking output fails visibly;
+recompilation preserves this normalization without manual YAML edits.
 
 An agent with repository write access could still weaken/delete the Markdown,
 generated workflow, evidence collector, triggers or prompts. This workflow

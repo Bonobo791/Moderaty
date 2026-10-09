@@ -730,7 +730,7 @@ jobs:
           export MCP_GATEWAY_DOMAIN="awmg-mcpg"
           export MCP_GATEWAY_HOST_DOMAIN="localhost"
           MCP_GATEWAY_AGENT_ID=$(openssl rand -base64 45 | tr -d '/+=')
-          echo "::add-mask::${MCP_GATEWAY_AGENT_ID}"
+          printf '%s\n' "::add-mask::$MCP_GATEWAY_AGENT_ID"
           export MCP_GATEWAY_AGENT_ID
           export MCP_GATEWAY_PAYLOAD_DIR="/tmp/gh-aw/mcp-payloads"
           mkdir -p "${MCP_GATEWAY_PAYLOAD_DIR}"

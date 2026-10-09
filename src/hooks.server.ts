@@ -14,13 +14,15 @@ import errorPage from './error.html?raw';
 
 type Event = Parameters<Handle>[0]['event'];
 
-function cacheResponse(response: Response, event: Event): Response {
-	const etag = response.headers.get('etag');
-	const clientHeader = event.request?.headers.get('if-none-match');
+function matchesEntityTag(clientHeader: string | null | undefined, etag: string): boolean {
 	// Match complete quoted tags: a comma can also occur inside an opaque tag.
 	const tags = clientHeader?.match(/(?:W\/)?"[^"]*"/g) ?? [];
-	const matches = clientHeader?.trim() === '*' || tags.some((tag) => tag.replace(/^W\//, '') === etag?.replace(/^W\//, ''));
-	if (response.status !== 200 || etag === null || !matches) return response;
+	return clientHeader?.trim() === '*' || tags.some((tag) => tag.replace(/^W\//, '') === etag.replace(/^W\//, ''));
+}
+
+function cacheResponse(response: Response, event: Event): Response {
+	const etag = response.headers.get('etag');
+	if (response.status !== 200 || etag === null || !matchesEntityTag(event.request?.headers.get('if-none-match'), etag)) return response;
 	const cacheHeaders = new Set(['etag', 'cache-control', 'content-location', 'date', 'expires', 'vary', 'set-cookie']);
 	const headers = new Headers(Array.from(response.headers).filter(([key]) => cacheHeaders.has(key)));
 	// Preserve separate Set-Cookie fields rather than a comma-joined value.

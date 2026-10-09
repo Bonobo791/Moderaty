@@ -41,7 +41,7 @@ Check out the upstream revision above outside the Moderaty checkout; leave it
 unchanged. Run from Moderaty after the locked dependency installation:
 
 ```sh
-node --test scripts/merge-evidence/verify.checks.mjs
+node --test scripts/merge-evidence/tests/verify.mjs
 node scripts/merge-evidence/examples.mjs /absolute/path/to/merge-evidence-gate /fresh/output/directory
 npm run check
 npm run build

@@ -36,7 +36,7 @@ jobs:
         with:
           node-version: '24.19.0'
       - run: npm ci --ignore-scripts
-      - run: node --test scripts/merge-evidence/verify.checks.mjs
+      - run: node --test scripts/merge-evidence/tests/verify.mjs
       - name: Validate gate against real passing and misleading examples
         run: node scripts/merge-evidence/examples.mjs "$GITHUB_WORKSPACE/gate-tool" "$RUNNER_TEMP/merge-evidence-examples"
       # Sync SvelteKit before Vitest; existing checks.yml also checks/builds.

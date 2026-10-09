@@ -65,9 +65,15 @@ for (const scenario of scenarios) {
 	}
 	assert.equal(prepared.status, 0, prepared.stderr);
 	const startedAt = readFileSync(resolve(dir, 'merge-evidence-start.txt'), 'utf8');
+	// GitHub creates these command files before an action starts. Emulate that
+	// contract so a receipt written before a plumbing crash cannot pass a case.
+	write('outputs.txt', ''); write('summary.md', '');
 	const run = spawnSync(process.execPath, [resolve(tool, 'dist/index.js')], { cwd: dir, env, encoding: 'utf8', timeout: 60_000 });
 	write('action.log', `${run.stdout}\n${run.stderr}`);
 	const receipt = JSON.parse(readFileSync(resolve(dir, 'receipt.json'), 'utf8'));
+	assert.equal(run.status, receipt.verdict === 'FAIL' ? 1 : 0, `${scenario.name}: action failed before applying its verdict`);
+	assert.match(readFileSync(resolve(dir, 'outputs.txt'), 'utf8'), /verdict/);
+	assert(readFileSync(resolve(dir, 'summary.md'), 'utf8').length > 0, 'action did not publish its summary');
 	let accepted = true;
 	try { verifyFiles(resolve(dir, 'receipt.json'), resolve(dir, '.merge-evidence/vitest-results.json'), { headSha, baseSha, startedAt }); }
 	catch { accepted = false; }
@@ -75,7 +81,7 @@ for (const scenario of scenarios) {
 	if (scenario.check) assert(receipt.discrepancies.some((d) => d.check === scenario.check), `${scenario.name}: expected ${scenario.check}`);
 	if (scenario.review) assert.equal(receipt.verdict, 'NEEDS_HUMAN');
 	const result = { scenario: scenario.name, verdict: receipt.verdict, accepted, reviewRequired: scenario.review ?? false,
-		exitCode: receipt.observed.exit_code, tests: receipt.observed.totals, checks: receipt.discrepancies.map((d) => d.check) };
+		actionExit: run.status, exitCode: receipt.observed.exit_code, tests: receipt.observed.totals, checks: receipt.discrepancies.map((d) => d.check) };
 	results.push(result); console.info(JSON.stringify(result));
 }
 writeFileSync(resolve(output, 'results.json'), JSON.stringify({ upstreamRevision: pin, scenarios: results }, null, 2));

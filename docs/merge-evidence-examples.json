@@ -6,6 +6,7 @@
       "verdict": "PASS",
       "accepted": true,
       "reviewRequired": false,
+      "actionExit": 0,
       "exitCode": 0,
       "tests": {
         "run": 2,
@@ -21,6 +22,7 @@
       "verdict": "FAIL",
       "accepted": false,
       "reviewRequired": false,
+      "actionExit": 1,
       "exitCode": 1,
       "tests": {
         "run": 2,
@@ -40,6 +42,7 @@
       "verdict": "PASS",
       "accepted": false,
       "reviewRequired": false,
+      "actionExit": 0,
       "exitCode": 1,
       "tests": {
         "run": 2,
@@ -57,6 +60,7 @@
       "verdict": "FAIL",
       "accepted": false,
       "reviewRequired": false,
+      "actionExit": 1,
       "exitCode": 0,
       "tests": {
         "run": 2,
@@ -74,6 +78,7 @@
       "verdict": "FAIL",
       "accepted": false,
       "reviewRequired": false,
+      "actionExit": 1,
       "exitCode": 0,
       "tests": {
         "run": 2,
@@ -92,6 +97,7 @@
       "verdict": "NEEDS_HUMAN",
       "accepted": true,
       "reviewRequired": true,
+      "actionExit": 0,
       "exitCode": 0,
       "tests": {
         "run": 2,
@@ -109,6 +115,7 @@
       "verdict": "NEEDS_HUMAN",
       "accepted": true,
       "reviewRequired": true,
+      "actionExit": 0,
       "exitCode": 0,
       "tests": {
         "run": 1,
@@ -126,6 +133,7 @@
       "verdict": "NEEDS_HUMAN",
       "accepted": true,
       "reviewRequired": true,
+      "actionExit": 0,
       "exitCode": 0,
       "tests": {
         "run": 2,
@@ -144,6 +152,7 @@
       "verdict": "PASS",
       "accepted": true,
       "reviewRequired": false,
+      "actionExit": 0,
       "exitCode": 0,
       "tests": {
         "run": 3,

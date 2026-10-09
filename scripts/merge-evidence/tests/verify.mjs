@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { verifyFiles, verifyReceipt } from './verify.mjs';
+import { verifyFiles, verifyReceipt } from '../verify.mjs';
 
 const context = { headSha: 'a'.repeat(40), baseSha: 'b'.repeat(40), startedAt: '2026-10-09T12:00:00Z' };
 const receipt = () => ({
@@ -68,7 +68,7 @@ test('requires freshly written per-test results that agree with the receipt', ()
 
 test('preparation removes stale artifacts and refuses a narrowed npm test script', () => {
 	const dir = mkdtempSync(resolve(tmpdir(), 'meg-prepare-'));
-	const prepare = new URL('./prepare.mjs', import.meta.url);
+	const prepare = new URL('../prepare.mjs', import.meta.url);
 	try {
 		writeFileSync(resolve(dir, 'receipt.json'), 'old');
 		writeFileSync(resolve(dir, 'package.json'), JSON.stringify({ scripts: { test: 'vitest run one.test.js' } }));

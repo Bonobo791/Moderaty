@@ -50,3 +50,5 @@ reasonix.toml
 # A bare `.agents` would exclude the directory itself and make re-including
 # anything under it impossible.
 .agents/*
+# Reviewed local workflow compiler (never committed)
+/.tools/

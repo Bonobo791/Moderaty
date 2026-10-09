@@ -626,15 +626,15 @@ test('unexpected resolve errors retain a generic outcome and correlated event ev
 	expect(JSON.stringify(errorLog.mock.calls)).not.toContain('synthetic-private-value');
 });
 
-test('a controlled HTML failure stays localized and escapes its message', async () => {
+test.each(['/login', '/account-deleted'])('English fallback errors on %s keep English language and escape messages', async (path) => {
 	let failure;
 	try { error(503, '<script>synthetic-private-value</script>'); } catch (e) { failure = e; }
 	mocks.assertMigrationsCurrent.mockRejectedValue(failure);
-	const event = { ...makeEvent(), route: { id: '/login' }, url: new URL('http://localhost/login'), cookies: { get: () => 'pt-BR', set: vi.fn() }, request: new Request('http://localhost/login') };
+	const event = { ...makeEvent(), route: { id: path }, url: new URL('http://localhost' + path), cookies: { get: () => 'pt-BR', set: vi.fn() }, request: new Request('http://localhost' + path) };
 	const response = await handle({ event, resolve: vi.fn() } as never);
 	const html = await response.text();
 	expect(response.status).toBe(503);
-	expect(html).toContain('<html lang="pt-BR">');
+	expect(html).toContain('<html lang="en">');
 	expect(html).toContain('&lt;script&gt;synthetic-private-value&lt;/script&gt;');
 	expect(html).not.toContain('<script>');
 	expect(response.headers.get('content-type')).toBe('text/html; charset=utf-8');

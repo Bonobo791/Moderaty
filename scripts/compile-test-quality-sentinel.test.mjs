@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { expect, test } from 'vitest';
 import { normalizeGatewayMask } from './compile-test-quality-sentinel.mjs';
@@ -21,4 +21,11 @@ test('compiled masking preserves literal values and cannot execute shell content
 
 test('unexpected compiler masking output fails visibly instead of silently skipping normalization', () => {
 	expect(() => normalizeGatewayMask('jobs: {}')).toThrow(/Expected exactly one gateway masking command/);
+});
+
+
+test.each(['../../etc/passwd', '/bin/sh', '$(exit 42)'])('compiler rejects caller-supplied paths: %s', (path) => {
+	const result = spawnSync(process.execPath, ['scripts/compile-test-quality-sentinel.mjs', path], { encoding: 'utf8' });
+	expect(result.status).toBe(1);
+	expect(result.stderr).toContain('Compiler path is fixed; no CLI arguments are accepted');
 });

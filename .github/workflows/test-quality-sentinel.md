@@ -2,12 +2,12 @@
 name: Test Quality Sentinel
 description: Review behavioral value of TypeScript, Vitest and Playwright tests on every PR update
 on:
-  pull_request:
+  pull_request_target:
     branches: [dev, main]
-    max-stack: -1
     types: [opened, synchronize, reopened, ready_for_review]
   roles: all
   report-blocked-version: false
+if: github.event.pull_request.head.repo.id == github.event.repository.id
 permissions:
   contents: read
   pull-requests: read

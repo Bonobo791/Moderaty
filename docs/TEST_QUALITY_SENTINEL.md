@@ -4,8 +4,9 @@ The standard GitHub Actions entry point is
 `.github/workflows/test-quality-sentinel.lock.yml`. Its editable source is
 `test-quality-sentinel.md`. It runs on opened, updated, reopened and ready PRs
 targeting `dev` or `main`, including drafts, human-authored and stacked PRs.
-`max-stack: -1` explicitly overrides gh-aw's default top-of-stack-only guard. Fork PRs
-are excluded by gh-aw's default activation policy; this is not a required check
+The trusted `pull_request_target` trigger runs the workflow from the base branch;
+PR edits cannot replace the workflow or collector in that run. Fork PRs
+are excluded by an explicit repository-ID activation condition; this is not a required check
 for forks. There is no author-name filter or dependency on another CI result.
 
 The sentinel reviews useful behavioral coverage, excessive business-logic
@@ -66,7 +67,9 @@ Nothing here modifies repository security settings.
 Compile with the reviewed `gh-aw` v0.89.21 binary:
 
 ```sh
-node scripts/compile-test-quality-sentinel.mjs /path/to/gh-aw
+mkdir -p .tools
+cp /path/to/reviewed/gh-aw .tools/gh-aw
+node scripts/compile-test-quality-sentinel.mjs
 ```
 
 Linux binary SHA-256:
@@ -75,15 +78,32 @@ Commit both Markdown and generated YAML. Inlining enables full prompt hashing
 in the framework's stale-lock check. Review action/container changes on each
 compiler upgrade; never hand-edit generated YAML.
 
-The wrapper verifies the compiler checksum, uses the pinned strict compilation
+The wrapper accepts no CLI arguments and reads only `.tools/gh-aw`.
+It verifies the compiler checksum, uses the pinned strict compilation
 options, then normalizes the generated gateway mask to a literal `printf`
 command. Masking stays enabled. Unexpected masking output fails visibly;
 recompilation preserves this normalization without manual YAML edits.
 
 An agent with repository write access could still weaken/delete the Markdown,
 generated workflow, evidence collector, triggers or prompts. This workflow
-does not protect itself. Enforcing human review of those paths requires a
+protects the current run from PR edits, but changes merged into the trusted base
+can still weaken future runs. Enforcing human review of those paths requires a
 separately authorized ruleset/CODEOWNERS policy. No policy was changed here.
+
+## Trigger security review
+
+Switching to `pull_request_target` makes the base-branch workflow the trusted
+control plane. The generated activation job excludes forks before accessing
+secrets. The agent has read-only permissions, checks out only the base SHA and
+the pinned collector, and reads candidate commits as Git data. No new or removed
+secrets, actions, containers, or network redirects accompany this change;
+`COPILOT_GITHUB_TOKEN` remains the inference credential. The trigger's compiler
+security warning is expected and reviewed for these constraints.
+
+The add-mask audit rule flags every masking command, regardless of shell syntax.
+The generated mask stays enabled; removing it to clear the audit would expose
+the gateway credential. Local Lizard v1.24.1 measures `matchesEntityTag` at five
+lines, so the reported 155-line function is a parser false positive.
 
 ## Validation and limits
 

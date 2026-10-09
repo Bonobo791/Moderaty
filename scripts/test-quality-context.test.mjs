@@ -93,7 +93,9 @@ test('reads wildcard filenames literally without mixing in a second test diff', 
 
 test('the introduction workflow runs its pinned collector even when the base has no collector', () => {
 	const workflow = readFileSync(new URL('../.github/workflows/test-quality-sentinel.md', import.meta.url), 'utf8');
-	expect(workflow).toMatch(/max-stack: -1/);
+	expect(workflow).toMatch(/  pull_request_target:\n/);
+	expect(workflow).not.toMatch(/  pull_request:\n/);
+	expect(workflow).toContain('if: github.event.pull_request.head.repo.id == github.event.repository.id');
 	expect(workflow).toContain('model: copilot/gpt-5.4');
 	expect(workflow).not.toContain('copilot-requests: write');
 	expect(readFileSync(new URL('../.github/workflows/test-quality-sentinel.lock.yml', import.meta.url), 'utf8')).toContain('secrets.COPILOT_GITHUB_TOKEN');

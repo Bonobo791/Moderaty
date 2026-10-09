@@ -5,11 +5,11 @@ import { pathToFileURL } from 'node:url';
 
 const SHA = /^[a-f0-9]{40}$/;
 const TEST = /\.(test|spec)\.[cm]?[jt]sx?$/;
-const CONTROL_NAMES = ['package.json', 'package-lock.json'];
+const CONTROL_NAMES = new Set(['package.json', 'package-lock.json']);
 const CONTROL_PREFIXES = ['vitest', 'vite.config.', 'playwright.config.', 'stryker', 'tsconfig'];
 function isControl(path) {
 	const filename = path.split('/').at(-1);
-	return path.startsWith('.github/workflows/') || CONTROL_NAMES.includes(filename) ||
+	return path.startsWith('.github/workflows/') || CONTROL_NAMES.has(filename) ||
 		CONTROL_PREFIXES.some((prefix) => filename.startsWith(prefix));
 }
 

@@ -89,10 +89,7 @@ export const handle: Handle = async (input) => {
 		if (wantsJson(event)) {
 			return correlate(json(body, { status }), event);
 		}
-		const locale = isBilingualPath(event.url.pathname)
-			? resolveLocale({ cookie: event.cookies.get(LOCALE_COOKIE), acceptLanguage: event.request?.headers.get('accept-language') }) : 'en';
-		const htmlLang = locale === 'pt-BR' ? '<html lang="pt-BR">' : '<html lang="en">';
-		const html = errorPage.replace('<html lang="en">', htmlLang)
+		const html = errorPage
 			.split('%sveltekit.status%').join(String(status))
 			.split('%sveltekit.error.message%').join(escapeHtml(body.message ?? 'Internal Error'));
 		return correlate(new Response(html, { status, headers: { 'content-type': 'text/html; charset=utf-8' } }), event);
@@ -107,6 +104,32 @@ function emitBoundaryFailure(type: 'migration_check_failed' | 'session_lookup_fa
 		route: event.route.id, requestId: event.locals.requestId,
 		diagnosticError: controlled ? undefined : failure
 	});
+}
+
+async function resolveSession(event: Event): Promise<void> {
+	const token = event.cookies.get(SESSION_COOKIE);
+	try {
+		const resolution = await getSessionUser(token);
+		event.locals.user = resolution?.user ?? null;
+		if (resolution?.renewed && token) {
+			event.cookies.set(SESSION_COOKIE, token, {
+				path: '/',
+				httpOnly: true,
+				sameSite: 'lax',
+				secure: cookieSecure(),
+				expires: new Date(resolution.expiresAt)
+			});
+		}
+	} catch (e) {
+		// Correlate controlled failures too; never serialize their error body.
+		emitBoundaryFailure('session_lookup_failed', e, event);
+		// A deliberate HttpError (e.g. the account-has-no-org integrity failure)
+		// is NOT an outage: let it fail loudly instead of masking it as
+		// maintenance and signing the user out.
+		if (isHttpError(e)) throw e;
+		event.locals.dbDown = true;
+		event.locals.user = null;
+	}
 }
 
 // Resolves the session cookie into locals.user for every request. When the
@@ -165,29 +188,7 @@ const handleRequest: Handle = async ({ event, resolve }) => {
 		event.locals.user = null;
 		return resolveLocalized();
 	}
-	const token = event.cookies.get(SESSION_COOKIE);
-	try {
-		const resolution = await getSessionUser(token);
-		event.locals.user = resolution?.user ?? null;
-		if (resolution?.renewed && token) {
-			event.cookies.set(SESSION_COOKIE, token, {
-				path: '/',
-				httpOnly: true,
-				sameSite: 'lax',
-				secure: cookieSecure(),
-				expires: new Date(resolution.expiresAt)
-			});
-		}
-	} catch (e) {
-		// Correlate controlled failures too; never serialize their error body.
-		emitBoundaryFailure('session_lookup_failed', e, event);
-		// A deliberate HttpError (e.g. the account-has-no-org integrity failure)
-		// is NOT an outage: let it fail loudly instead of masking it as
-		// maintenance and signing the user out.
-		if (isHttpError(e)) throw e;
-		event.locals.dbDown = true;
-		event.locals.user = null;
-	}
+	await resolveSession(event);
 	return resolveLocalized();
 };
 

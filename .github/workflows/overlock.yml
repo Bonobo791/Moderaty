@@ -1,0 +1,89 @@
+name: Overlock test integrity
+
+on:
+  pull_request:
+    branches: [dev, main]
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Overlock audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Read candidate git objects
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Read audit policy from the PR base
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: policy
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.19.0'
+
+      - name: Select baseline policy and install the pinned audit engine
+        id: policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          policy="$GITHUB_WORKSPACE/policy"
+          if [ ! -f "$policy/.github/overlock/package-lock.json" ]; then
+            # First installation has no policy on its base branch. This is
+            # explicitly a bootstrap, not proof of an independent gate.
+            policy="$GITHUB_WORKSPACE/candidate"
+            echo '::warning::Bootstrap: the base branch has no Overlock policy. Maintainer review is required before this policy becomes trusted.'
+          fi
+          tool="$RUNNER_TEMP/moderaty-overlock-tool"
+          mkdir -p "$tool"
+          cp "$policy/.github/overlock/package.json" "$policy/.github/overlock/package-lock.json" "$tool/"
+          cd "$tool"
+          npm ci --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org
+          echo "root=$policy" >> "$GITHUB_OUTPUT"
+          echo "OVERLOCK_MODULE=$tool/node_modules/overlock/dist/index.js" >> "$GITHUB_ENV"
+
+      - name: Validate baseline detectors against positive and benign controls
+        shell: bash
+        env:
+          POLICY_ROOT: ${{ steps.policy.outputs.root }}
+        run: node --test "$POLICY_ROOT/scripts/overlock/audit.probe.mjs"
+
+      - name: Audit the complete PR diff
+        uses: rxova/overlock@dabf34a8b0595bd11f5be8b5b59ef3c6b01ca24c # reviewed 2026-10-09
+        with:
+          base: ${{ github.event.pull_request.base.sha }}
+          fail-on: high
+          comment: 'false'
+          working-directory: candidate
+          cli-path: ${{ steps.policy.outputs.root }}/scripts/overlock/audit.mjs
+          version: '0.10.4'
+
+      - name: Summarize integrity findings
+        if: always()
+        shell: bash
+        run: |
+          if [ -f "$RUNNER_TEMP/overlock-report.json" ]; then
+            REPORT="$RUNNER_TEMP/overlock-report.json" node --input-type=module <<'NODE'
+          import { readFileSync, appendFileSync } from 'node:fs';
+          const report = JSON.parse(readFileSync(process.env.REPORT, 'utf8'));
+          const summary = {
+            base: report.base, head: report.head, patch_sha256: report.patch_sha256,
+            scope: report.scope, counts: report.counts, ok: report.ok,
+            engine_version: report.engine_version, policy: report.policy
+          };
+          appendFileSync(process.env.GITHUB_STEP_SUMMARY, '### Overlock audit\n\n```json\n' + JSON.stringify(summary, null, 2) + '\n```\n\nFull findings are in the audit step log. This audit detects structural test weakening; it does not establish application correctness.\n');
+          NODE
+          else
+            echo 'Audit did not produce a report; inspect the failed step.' >> "$GITHUB_STEP_SUMMARY"
+          fi

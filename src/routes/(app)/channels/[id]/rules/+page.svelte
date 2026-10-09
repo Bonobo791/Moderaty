@@ -51,7 +51,7 @@
 {/each}
 
 <h2>Protected handles</h2>
-<p class="page-sub">Handles are verified with YouTube. Protection follows the same YouTube account, even if its name or handle changes.</p>
+<p class="page-sub">Handles are verified with YouTube. Protection follows the handle: whichever account currently holds it is protected.</p>
 <p class="page-sub">{data.handles.length}/100 protected handles</p>
 
 <div class="card">

@@ -35,7 +35,7 @@ container images have digests. The Codex CLI version is pinned to
 The framework's secondary detection engine also uses Codex and the same OpenAI credential.
 
 The collector is checked out separately at the reviewed immutable commit
-`81ea1fd9aee316893c2c4a22de4ea75644be8ca8`. The evidence repository stays
+`4bb3972f18493c134465ee30a85bcc0a8fe0e2f1`. The evidence repository stays
 at the event's base SHA. The collector fetches the PR head
 as Git data, verifies the fetched SHA and compares from the merge base. It never
 checks out, imports or runs candidate files. Credentials are not persisted by
@@ -99,7 +99,10 @@ secrets. The agent has read-only permissions, checks out only the base SHA and
 the pinned collector, and reads candidate commits as Git data. The Codex migration removes Copilot credential forwarding and introduces
 `CODEX_API_KEY` / `OPENAI_API_KEY` for inference. Both main and detection runs
 use the framework's OpenAI proxy, which keeps real keys outside the agent
-container. No action pins, container pins or custom network redirects change.
+container. Codex installation adds `actions/setup-node@820762786026740c76f36085b0efc47a31fe5020`
+(v7.0.0). The unused CLI-proxy image is removed from the manifest and image
+downloads; the remaining container digests are unchanged. No custom network
+redirects were added.
 OpenAI inference replaces the Copilot inference destination. The trigger's compiler
 security warning is expected and reviewed for these constraints.
 

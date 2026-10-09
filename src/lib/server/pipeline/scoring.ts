@@ -133,7 +133,13 @@ const newComments = page.comments.filter((comment) => {
 const allowlist = await loadProtectedIdentities(channelId, db, newComments.length
 	? handle => resolveHandleChannelId(handle, options.accessToken, options.deadline)
 	: undefined);
-const handles = await fetchAuthorHandles(newComments.map(comment => comment.authorChannelId), options.accessToken, options.deadline);
+let handles = new Map<string, string>();
+try {
+	handles = await fetchAuthorHandles(newComments.map(comment => comment.authorChannelId), options.accessToken, options.deadline);
+} catch (error) {
+	if (error instanceof DeadlineExceededError) throw error;
+	console.warn('YouTube author-handle lookup failed; continuing without audit handles', error);
+}
 for (const comment of newComments) comment.authorHandle = handles.get(comment.authorChannelId) ?? null;
 // A ticked protection flag forces the tone pass on even below
 // TONE_LEVEL_OMNI_AND_TONE: the channel owner asked for heightened scrutiny,

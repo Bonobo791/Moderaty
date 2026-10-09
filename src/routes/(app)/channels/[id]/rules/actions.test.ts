@@ -255,10 +255,16 @@ test('load returns this channel protected handles, newest first', async () => {
 test('addHandle validates, normalizes, and stores the handle', async () => {
 	await seedChannel('UC1');
 
-	const res = await addHandle('UC1', '  @SomeUser ');
+	vi.useFakeTimers({ toFake: ['Date'] });
+	vi.setSystemTime(new Date('2026-10-09T00:00:00.000Z'));
+	let res;
+	try { res = await addHandle('UC1', '  @SomeUser '); } finally { vi.useRealTimers(); }
 	expect(res).toEqual({ ok: true });
 
-	expect(await handleRows()).toEqual([expect.objectContaining({ channelId: 'UC1', handle: 'someuser' })]);
+	expect(await handleRows()).toEqual([expect.objectContaining({ channelId: 'UC1', handle: 'someuser', createdAt: '2026-10-09T00:00:00.000Z' })]);
+	expect(provider.resolve).toHaveBeenCalledWith('someuser', 'synthetic-token');
+	expect((await handleRows())[0]).not.toHaveProperty('resolvedChannelId');
+	expect(JSON.stringify(await handleRows())).not.toContain('verified-author');
 });
 
 test('addHandle rejects an invalid handle with 400 and inserts nothing', async () => {

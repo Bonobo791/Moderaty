@@ -713,6 +713,14 @@ test('a deadline-partial run records failed/timeout health, never success', asyn
 	expect(row?.leaseExpiresAt).toBeNull();
 });
 
+test('an audit handle lookup failure records a user-visible health category', async () => {
+	await seedChannel('UC-handles');
+	mocks.runChannel.mockResolvedValue(runResult({ dryRun: false, handleLookupError: true }));
+	const res = await call({ bearer: 'test-secret' });
+	expect(res.status).toBe(200);
+	expect(await channelRow('UC-handles')).toMatchObject({ lastRunStatus: 'failed', lastRunError: 'handles' });
+});
+
 test('a credit-starved run records failed/credits health, never success', async () => {
 	// codex, PR #142: outOfCredits also resolves — the channel fetched comments
 	// but deferred every AI decision, so "Protected" would be a lie; the

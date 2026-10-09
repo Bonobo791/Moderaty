@@ -165,7 +165,10 @@ test('failed explicit resolution retains the unresolved row and original configu
 
 test('duplicate verification discards a different current holder without rebinding stored data', async () => {
 	const original = await addHandle('UC1', 'legacy-handle', async () => 'first-holder');
-	await addHandle('UC1', 'legacy-handle', async () => 'later-holder');
+	await addHandle('UC1', 'legacy-handle', async () => {
+		await addHandle('UC1', 'legacy-handle', async () => 'concurrent-holder');
+		return 'later-holder';
+	});
 	expect(await rows()).toEqual([original]);
 	expect(original).not.toHaveProperty('resolvedChannelId');
 });

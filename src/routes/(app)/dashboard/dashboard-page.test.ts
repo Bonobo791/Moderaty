@@ -223,6 +223,12 @@ test('a channel whose latest run failed is never presented as protected (MOD-8)'
 	expect(body).toContain('1 of 3 channels protected — 1 failed the last check, 1 waiting for a first check.');
 });
 
+test('an audit handle lookup failure explains missing handles without exposing provider details', () => {
+	const failed = { ...PENDING_DATA, chs: CHS.map(ch => ch.id === 'UC2' ? { ...ch, lastRunStatus: 'failed', lastRunError: 'handles' } : ch) };
+	const row = rowFor(renderPage(failed), 'Second Channel');
+	expect(row).toContain('YouTube author handles could not be loaded; moderation continued, but some audit entries have no handle.');
+});
+
 test.each([
 	{ category: 'quota', action: 'YouTube quota is exhausted' },
 	{ category: 'credits', action: 'AI credits ran out' },

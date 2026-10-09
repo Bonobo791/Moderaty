@@ -69,6 +69,7 @@ export async function prepareDecisionBatch(
 	aiBudget: AiBudget;
 	videoContext: Awaited<ReturnType<typeof fetchVideoMetadata>> | null;
 	metadataError: unknown;
+	handleLookupError: boolean;
 	protectedIds: string[];
 }> {
 // Credits gate AI scoring for live runs only (I8: a dry run changes nothing
@@ -134,11 +135,13 @@ const allowlist = await loadProtectedIdentities(channelId, db, newComments.lengt
 	? handle => resolveHandleChannelId(handle, options.accessToken, options.deadline)
 	: undefined);
 let handles = new Map<string, string>();
+let handleLookupError = false;
 try {
 	handles = await fetchAuthorHandles(newComments.map(comment => comment.authorChannelId), options.accessToken, options.deadline);
 } catch (error) {
 	if (error instanceof DeadlineExceededError) throw error;
 	console.warn('YouTube author-handle lookup failed; continuing without audit handles', error);
+	handleLookupError = true;
 }
 for (const comment of newComments) comment.authorHandle = handles.get(comment.authorChannelId) ?? null;
 // A ticked protection flag forces the tone pass on even below
@@ -152,7 +155,7 @@ const { videoContext, metadataError } = await loadVideoContext(
 	options.accessToken,
 	options.deadline
 );
-return { newComments, rulesForChannel, allowlist, aiBudget, videoContext, metadataError, protectedIds };
+return { newComments, rulesForChannel, allowlist, aiBudget, videoContext, metadataError, handleLookupError, protectedIds };
 }
 export async function scoreComments(
 	newComments: Array<CommentPage['comments'][number]>,
@@ -229,7 +232,7 @@ export async function decideNewComments(
 		scanStamp,
 		consumeCredits
 	}: DecisionBatchOptions
-): Promise<{ decisions: Decision[]; failures: string[]; deferred: number; protectedIds: string[]; protection: Awaited<ReturnType<typeof loadProtectedIdentities>> }> {
+): Promise<{ decisions: Decision[]; failures: string[]; deferred: number; protectedIds: string[]; handleLookupError: boolean; protection: Awaited<ReturnType<typeof loadProtectedIdentities>> }> {
 	const batch = await prepareDecisionBatch(channelId, page, {
 		accessToken,
 		toneLevel,
@@ -251,5 +254,5 @@ export async function decideNewComments(
 		protections,
 		openAiKey
 	});
-	return { ...foldDecisions(settled), protectedIds: batch.protectedIds, protection: batch.allowlist };
+	return { ...foldDecisions(settled), protectedIds: batch.protectedIds, handleLookupError: batch.handleLookupError, protection: batch.allowlist };
 }

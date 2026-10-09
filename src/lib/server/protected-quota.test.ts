@@ -36,7 +36,7 @@ test.each([false,true])('audit enrichment failure does not prevent rule moderati
 	if (!configured) await testDb().db.delete(channelAllowedHandles);
 	enrichmentFailure = 403;
 	page = [{id:'thread',snippet:{topLevelComment:{id:'ordinary-comment',snippet:{authorChannelId:{value:'ordinary-author'},authorDisplayName:'Different Name',textDisplay:'ban-trigger',publishedAt:'2026-10-09T00:00:00Z'}}}}];
-	expect(await runChannel('owner',{forceDryRun:false})).toMatchObject({fetched:1,acted:1,partial:false});
+	expect(await runChannel('owner',{forceDryRun:false})).toMatchObject({fetched:1,acted:1,partial:false,handleLookupError:true});
 	expect(writes).toHaveLength(1);
 	expect(await testDb().db.select().from(moderationActions).all()).toEqual([expect.objectContaining({state:'completed',action:'ban'})]);
 	expect(await testDb().db.select().from(auditLog).all()).toEqual([expect.objectContaining({action:'ban',authorHandle:null})]);
@@ -48,6 +48,14 @@ test('audit enrichment deadline still stops the run before any moderation write'
 	expect(await runChannel('owner',{forceDryRun:false})).toMatchObject({partial:true,stoppedReason:'deadline'});
 	expect(writes).toEqual([]);
 	expect(await testDb().db.select().from(moderationActions).all()).toEqual([]);
+});
+
+test('a background preview persists missing-handle warnings in its visible audit reason', async () => {
+	enrichmentFailure = 403;
+	page = [{id:'thread',snippet:{topLevelComment:{id:'ordinary-comment',snippet:{authorChannelId:{value:'ordinary-author'},textDisplay:'ban-trigger',publishedAt:'2026-10-09T00:00:00Z'}}}}];
+	expect(await runChannel('owner',{forceDryRun:true,window:{boundary:'2026-01-01T00:00:00Z',pageToken:null}})).toMatchObject({dryRun:true,partial:false,handleLookupError:true});
+	expect(writes).toEqual([]);
+	expect(await testDb().db.select().from(auditLog).all()).toEqual([expect.objectContaining({action:'dry-run',authorHandle:null,reason:expect.stringContaining('YouTube author handles could not be loaded; moderation continued, but some audit entries have no handle.')})]);
 });
 afterEach(() => vi.unstubAllGlobals());
 

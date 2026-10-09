@@ -392,6 +392,12 @@ test('an all-time dry-run result names the window in the success line', () => {
 	expect(body).toContain('href="/channels/UC1/log"');
 });
 
+test('a completed dry run surfaces missing audit handles', () => {
+	const body = renderPage(LAYOUT_DATA, { ok: true, scope: 'dryRun', months: 3, fetched: 1, acted: 1, queued: 0, handleLookupError: true });
+	expect(body).toContain('role="alert"');
+	expect(body).toContain('YouTube author handles could not be loaded; moderation continued, but some audit entries have no handle.');
+});
+
 test('a dry-run failure renders the scoped error', () => {
 	const body = renderPage(LAYOUT_DATA, {
 		scope: 'dryRun',

@@ -1,0 +1,9 @@
+{
+  "name": "moderaty-overlock-audit",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "overlock": "0.10.4"
+  }
+}

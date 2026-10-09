@@ -1,0 +1,181 @@
+import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+// Verify the actual executable dependency before importing it. The action SHA
+// pins its shell wrapper; these hashes pin the independently published engine.
+const modulePath = process.env.OVERLOCK_MODULE ?? fileURLToPath(new URL('../../.github/overlock/node_modules/overlock/dist/index.js', import.meta.url));
+const engineHashes = {
+	'index.js': '02383c4075de9b359685889ee3cec6b959a4afd4ff87158888c4d4d89b1676a1',
+	'evaluation.js': '8476c19df0c204c0df9eed04b731f019568a5c347e6891144da4d3eba4b68406'
+};
+for (const [file, hash] of Object.entries(engineHashes)) {
+	if (createHash('sha256').update(readFileSync(resolve(dirname(modulePath), file))).digest('hex') !== hash) {
+		throw new Error(`Overlock engine integrity failed: ${file}`);
+	}
+}
+const { analyze, parseDiff, isTestFile } = await import(pathToFileURL(modulePath).href);
+
+const blockingRules = new Set([
+	'TEST_SKIPPED_ADDED', 'ASSERTION_WEAKENED', 'ASSERTION_NARROWED',
+	'ASSERTION_REMOVED', 'PREDICATE_NARROWED', 'SUITE_SCOPE_NARROWED',
+	'TEST_GATE_DISABLED', 'COVERAGE_THRESHOLD_LOWERED'
+]);
+
+function makeReport(findings, base, extra = {}) {
+	const unique = [...new Map(findings.map((finding) => [finding.id, finding])).values()];
+	const counts = { high: 0, medium: 0, low: 0 };
+	for (const finding of unique) counts[finding.severity] += 1;
+	return {
+		schema: 1, ok: counts.high === 0, base, fail_on: 'high', findings: unique,
+		counts, suppressed: 0, silenced: 0, allowed: [], ...extra
+	};
+}
+
+/** Analyze real rule output before any inline or trailer suppression applies. */
+export function auditDiff(diff, { base = 'fixture' } = {}) {
+	// Upstream recognizes Vite thresholds but not its Vitest include/exclude
+	// lists. Alias only patch headers; never import or execute vite.config.ts.
+	const alias = '.moderaty-overlock/vitest.config.ts';
+	const aliased = diff.replace(/^(diff --git a\/|--- a\/|\+\+\+ b\/)vite\.config\.ts(.*)$/gm, (line) => line.replace(/\bvite\.config\.ts\b/g, alias));
+	let produced;
+	analyze({ diff: aliased, base, testGlobs: [/\.probe\.mjs$/], onFindings: (findings) => { produced = findings; } });
+	if (!Array.isArray(produced)) throw new Error('Overlock did not produce raw findings');
+	const findings = produced.map((finding) => ({
+		...finding, file: finding.file === alias ? 'vite.config.ts' : finding.file,
+		id: finding.id.replace(alias, 'vite.config.ts'),
+		severity: blockingRules.has(finding.rule) ? 'high' : finding.severity
+	}));
+	// Vitest conditional declarations are not recognized by this upstream
+	// release. Flag their introduction without evaluating the condition.
+	for (const file of parseDiff(diff)) {
+		if (!isTestFile(file.path, [/\.probe\.mjs$/])) continue;
+		for (const hunk of file.hunks) for (const line of hunk.lines) {
+			if (line.kind !== 'add' || !/^\s*(?:it|test|describe|suite)\s*\.\s*(?:skipIf|runIf)\s*\(/.test(line.text)) continue;
+			findings.push({
+				id: `TEST_SKIPPED_ADDED:${file.path}:${line.newLine}`, rule: 'TEST_SKIPPED_ADDED', severity: 'high',
+				file: file.path, line: line.newLine, message: 'Conditional skip/run declaration added; test execution now depends on a condition.',
+				evidence: { after: line.text }, fix_hint: 'Run the test unconditionally or obtain a separately reviewed policy change.'
+			});
+		}
+	}
+	return makeReport(findings, base);
+}
+
+function supplemental(rule, key, message) {
+	return {
+		id: `${rule}:stryker.config.json:${key}`, rule, severity: 'high',
+		file: 'stryker.config.json', line: null, message, evidence: {},
+		fix_hint: 'Restore the gate or obtain a separate maintainer policy decision.'
+	};
+}
+
+function strykerConfig(text) {
+	if (text === null) return {};
+	let value;
+	try { value = JSON.parse(text); } catch { throw new Error('Stryker config is not valid JSON'); }
+	if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Stryker config must be an object');
+	if (value.thresholds !== undefined) {
+		if (!value.thresholds || typeof value.thresholds !== 'object' || Array.isArray(value.thresholds)) throw new Error('Stryker thresholds must be an object');
+		for (const [key, number] of Object.entries(value.thresholds)) {
+			if (!['high', 'low', 'break'].includes(key) || !Number.isFinite(number) || number < 0 || number > 100) throw new Error(`Invalid Stryker threshold: ${key}`);
+		}
+	}
+	if (value.mutate !== undefined && (!Array.isArray(value.mutate) || value.mutate.some((pattern) => typeof pattern !== 'string'))) {
+		throw new Error('Stryker mutate must be an array of strings for this audit');
+	}
+	return value;
+}
+
+/** JSON-level comparisons cover the config path upstream does not recognize. */
+export function inspectStryker(beforeText, afterText) {
+	const before = strykerConfig(beforeText);
+	const after = strykerConfig(afterText);
+	const findings = [];
+	for (const [key, old] of Object.entries(before.thresholds ?? {})) {
+		const next = after.thresholds?.[key];
+		if (next === undefined || next < old) findings.push(supplemental('COVERAGE_THRESHOLD_LOWERED', key, `Stryker ${key} changed from ${old} to ${next ?? 'absent'}.`));
+	}
+	if (after.mutate !== undefined) {
+		const old = before.mutate ?? [];
+		const removed = old.filter((pattern) => !pattern.startsWith('!') && !after.mutate.includes(pattern));
+		const excluded = after.mutate.filter((pattern) => pattern.startsWith('!') && !old.includes(pattern));
+		if (before.mutate === undefined || removed.length || excluded.length) {
+			findings.push(supplemental('SUITE_SCOPE_NARROWED', 'mutate', 'Stryker mutation scope was introduced, replaced, or given more exclusions; review the collected set.'));
+		}
+	}
+	return findings;
+}
+
+function git(cwd, args) {
+	return execFileSync('git', ['-c', 'core.fsmonitor=false', ...args], {
+		cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe']
+	}).trimEnd();
+}
+
+function configAt(cwd, revision, path) {
+	// Look up the tree first so only an absent file is optional. A failed read,
+	// symlink, submodule or changed object type must not silently skip the check.
+	const entry = git(cwd, ['ls-tree', revision, '--', path]);
+	if (entry === '') return null;
+	if (!entry.startsWith('100644 blob ') && !entry.startsWith('100755 blob ')) throw new Error(`Unsupported config object: ${path}`);
+	return git(cwd, ['show', `${revision}:${path}`]);
+}
+
+/** Read immutable git objects only: no npm scripts, test execution or config imports. */
+export function auditRepository({ cwd = process.cwd(), base }) {
+	if (!/^[a-f0-9]{40}$/.test(base ?? '')) throw new Error('Audit base must be a 40-character commit SHA');
+	const head = git(cwd, ['rev-parse', '--verify', 'HEAD^{commit}']);
+	const fork = git(cwd, ['merge-base', base, head]);
+	const diff = git(cwd, ['diff', '--no-ext-diff', '--no-textconv', '--no-renames', '--unified=80', fork, head, '--']);
+	if (diff === '') throw new Error('Audit diff is empty; no clean verdict was produced');
+	const report = auditDiff(`${diff}\n`, { base: fork });
+	const extra = inspectStryker(configAt(cwd, fork, 'stryker.config.json'), configAt(cwd, head, 'stryker.config.json'));
+	const files = git(cwd, ['diff', '--name-only', '-z', fork, head, '--']).split('\0').filter(Boolean).length;
+	const commits = Number(git(cwd, ['rev-list', '--count', `${fork}..${head}`]));
+	return makeReport([...report.findings, ...extra], fork, {
+		head, requested_base: base, patch_sha256: createHash('sha256').update(`${diff}\n`).digest('hex'),
+		scope: { files, commits }, engine_version: '0.10.4', policy: 'moderaty-overlock-v1'
+	});
+}
+
+function cli(args) {
+	// The pinned composite action calls `config`, then `check` twice (JSON and
+	// human output). Its PR-body allow-file and severity arguments are deliberately
+	// ignored: the repository's CI policy above governs all three invocations.
+	const values = new Set(['--base', '--fail-on', '--severity', '--allow-file']);
+	const flags = new Set(['--json', '--no-ledger', '--explain-base']);
+	const command = args[0];
+	if (!['check', 'config'].includes(command)) throw new Error('Expected check or config');
+	let base;
+	for (let i = 1; i < args.length; i += 1) {
+		if (values.has(args[i])) {
+			const flag = args[i];
+			const value = args[++i];
+			if (value === undefined) throw new Error(`Missing argument: ${flag}`);
+			if (flag === '--base') base = value;
+		} else if (!flags.has(args[i])) throw new Error(`Unknown audit argument: ${args[i]}`);
+	}
+	if (command === 'config') {
+		process.stdout.write('Moderaty fixed audit policy: high gate; raw unsuppressed findings; no repository config, PR allowances, ledger, or evaluation writes.\n');
+		return 0;
+	}
+	const report = auditRepository({ base });
+	if (args.includes('--json')) process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+	else {
+		process.stdout.write(`Overlock: ${report.scope.files} files, ${report.scope.commits} commits, base ${report.base}, head ${report.head}\n`);
+		for (const finding of report.findings) {
+			const text = `${finding.severity} ${finding.rule} ${finding.file}:${finding.line ?? '-'} ${finding.message}`;
+			process.stdout.write(`${text.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 1000)}\n`);
+		}
+		process.stdout.write(report.ok ? 'No blocking findings; medium/low findings still require review.\n' : 'Blocking test-integrity findings.\n');
+	}
+	return report.ok ? 0 : 1;
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+	try { process.exitCode = cli(process.argv.slice(2)); }
+	catch (error) { console.error(`Overlock audit failed: ${error.message}`); process.exitCode = 2; }
+}

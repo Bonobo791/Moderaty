@@ -123,10 +123,28 @@ describe('pricing copy guardrails', () => {
 		const subscription = PRICING_FAQ_ENTRIES.find(({ q }) => q === 'Is there a subscription?')?.a;
 		expect(subscription).toMatch(/even (?:with|when).*no (?:comments|AI classifications)/i);
 		expect(subscription).toContain('100 AI classifications');
+		expect(subscription).toMatch(/active paid subscription.*even when purchased credits are zero/i);
 		const usage = PRICING_FAQ_ENTRIES.find(({ q }) => /run out/.test(q))?.a;
 		expect(usage).toMatch(/one credit.*moderation.*one.*digest/i);
 		expect(usage).toMatch(/400.*(?:left|remain)/i);
 		expect(usage).toMatch(/requested history.*again/i);
+	});
+
+	it('explains the Moderaty charge separately from self-hosting and OpenAI costs', () => {
+		const selfHost = PRICING_FAQ_ENTRIES.find(({ q }) => q === 'Why is self-hosting free?')?.a;
+		const lifetime = PRICING_FAQ_ENTRIES.find(({ q }) => q === 'What is the $49 lifetime deal?')?.a;
+		expect(selfHost).toMatch(/\$0 from Moderaty/i);
+		expect(selfHost).toMatch(/infrastructure.*OpenAI.*vary/i);
+		expect(selfHost).toMatch(/license excludes.*competing product/i);
+		expect(selfHost).not.toMatch(/near zero/i);
+		expect(lifetime).toMatch(/OpenAI.*separately/i);
+	});
+
+	it('links billing detail to the existing Terms page and OpenAI API prices', () => {
+		const calculator = readFileSync(new URL('../components/landing/pricing/CostMath.svelte', import.meta.url), 'utf8');
+		expect(calculator).toContain('href="/terms#s6"');
+		expect(calculator).toContain('href="https://developers.openai.com/api/docs/pricing"');
+		expect(calculator).toContain('rel="noopener noreferrer"');
 	});
 
 	it('limits the calculator to hosted monthly purchases and excludes BYOK provider costs', () => {
@@ -193,9 +211,9 @@ it('preserves the approved hosted and lifetime offers with BYOK disclosure', () 
 	expect(subscription).toContain('$5 a month');
 	expect(subscription).toContain('100 AI classifications');
 	const lifetime = PRICING_FAQ_ENTRIES.find(({ q }) => q === 'What is the $49 lifetime deal?')?.a;
-	expect(lifetime).toContain('First 1,000 users');
+	expect(lifetime).toContain('1,000 lifetime places');
 	expect(lifetime).toContain('one $49 payment');
-	expect(lifetime).toContain('hosted forever');
+	expect(lifetime).toContain('hosted Moderaty forever');
 	expect(lifetime).toContain('your own OpenAI API key');
 });
 

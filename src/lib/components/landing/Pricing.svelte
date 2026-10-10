@@ -13,7 +13,7 @@
 
 <section id="pricing" class="section">
 	<Reveal>
-		<h2 class="section-title">Free if you self-host. Five a month if you don't.</h2>
+		<h2 class="section-title">$0 from Moderaty if you self-host. Five a month if we host it.</h2>
 	</Reveal>
 
 	<div class="split">
@@ -27,7 +27,7 @@
 
 	<Reveal delay={0.1}>
 		<p class="more">
-			<span class="scarcity">First 1,000 users: $49 once for lifetime hosting, scoring on your own OpenAI key.</span>
+			<span class="scarcity">1,000 lifetime places: $49 once for lifetime hosting, scoring on your own OpenAI key.</span>
 			<a href="/pricing" data-moderaty-event="pricing_click" data-moderaty-placement="home_pricing" class="more-link">Full pricing breakdown <span class="arrow" aria-hidden="true">→</span></a>
 		</p>
 	</Reveal>

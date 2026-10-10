@@ -1,3 +1,9 @@
+import { expectedBundlePriceCents } from '$lib/credit-pricing';
+
+export const TOP_UP_BUNDLES_COPY = [500, 2000]
+	.map((size, index) => `${size.toLocaleString('en-US')}${index === 0 ? ' credits' : ''} for $${(expectedBundlePriceCents(size) / 100).toFixed(2)}`)
+	.join(' or ');
+
 /**
  * Plan panel copy, shared by the homepage pricing section (short lists) and
  * the /pricing page (detailed lists). Billing-policy claims are limited to
@@ -22,8 +28,8 @@ export const TICKS_SELF_HOSTED_DETAILED = [
 ];
 
 export const TICKS_HOSTED = [
-	'Auto-renews monthly, 100 comments included',
-	'Top-ups in bundles of 500 or 2,000 comments, up to 35% off',
+	'Auto-renews monthly, 100 AI classifications included',
+	TOP_UP_BUNDLES_COPY,
 	'Automatic top-up is opt-in',
 	'Same rules, same model, same audit log'
 ];
@@ -32,7 +38,8 @@ export const TICKS_HOSTED_DETAILED = [
 	'Everything in self-hosted',
 	'We run it, patch it, and keep it awake',
 	'One-click YouTube OAuth',
-	'100 comments a month; top up with comment bundles when you run out, up to 35% off',
+	'100 AI classifications per paid month, shared by moderation scoring and enabled feedback digests',
+	`${TOP_UP_BUNDLES_COPY} when you need more`,
 	'Automatic top-up is opt-in, off by default'
 ];
 
@@ -40,7 +47,7 @@ export const TICKS_LIFETIME = [
 	'One payment, hosted forever',
 	'AI scoring on your own OpenAI API key',
 	'Unlimited moderated comments',
-	'Only the first 1,000 users'
+	'Limited to 1,000 lifetime places'
 ];
 
 export const TICKS_LIFETIME_DETAILED = [
@@ -48,5 +55,5 @@ export const TICKS_LIFETIME_DETAILED = [
 	'We run it, patch it, and keep it awake, forever',
 	'AI scoring runs on your own OpenAI API key (Terms §6.1(c))',
 	'Unlimited moderated comments, no meter',
-	'Capped at the first 1,000 users, then it is gone'
+	'Limited to 1,000 lifetime places'
 ];

@@ -10,7 +10,7 @@
 		</Reveal>
 		<Reveal delay={0.08}>
 			<a href={LOGIN_URL} data-moderaty-event="connect_click" data-moderaty-placement="final_cta" class="btn-press cta">Connect YouTube channel</a>
-			<p class="microcopy">Google asks for standard YouTube access. Moderaty uses it for channel setup, comment moderation, and video titles and descriptions for context. Source-available under PolyForm Shield, free to self-host.</p>
+			<p class="microcopy">Google asks for standard YouTube access. Moderaty uses it for channel setup, comment moderation, and video titles and descriptions for context. Source-available under PolyForm Shield, self-hosting costs $0 from Moderaty. Infrastructure and OpenAI charges are separate.</p>
 		</Reveal>
 	</div>
 </section>

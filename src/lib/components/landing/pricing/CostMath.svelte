@@ -3,6 +3,7 @@
 -->
 
 <script lang="ts">
+	import { TOP_UP_BUNDLES_COPY } from '$lib/landing/plans';
 	import { page } from '$app/state';
 	import Reveal from '../Reveal.svelte';
 	import { estimateHostedMonth, forecastMonths, MAX_CALCULATOR_COMMENTS, MONTHLY_PLAN_USD, validCountInput } from '$lib/landing/cost';
@@ -52,7 +53,7 @@
 				<div class="terminal-body">
 					<div><span class="t-dim">monthly subscription</span> <span class="t-lit">$5, including zero usage</span></div>
 					<div><span class="t-dim">shared allowance</span> <span class="t-lit">100 AI classifications</span></div>
-					<div><span class="t-dim">top-up bundles</span> <span class="t-lit">500 / 2,000 credits: $20.40 / $64.65</span></div>
+					<div><span class="t-dim">top-up bundles</span> <span class="t-lit">{TOP_UP_BUNDLES_COPY}</span></div>
 					<div class="t-note">$5/mo renews. automatic top-up is opt-in.</div>
 				</div>
 			</div>
@@ -105,7 +106,7 @@
 			<p class="calculator-assumptions">
 				This calculator covers the recurring hosted plan. The lifetime plan is $49 once with
 				BYOK; self-hosting has no Moderaty subscription. Your OpenAI charges are separate and
-				outside this estimate, as are self-hosting infrastructure costs.
+				outside this estimate, as are self-hosting infrastructure costs. Read the <a href="/terms#s6">plan and billing terms</a> or check <a href="https://developers.openai.com/api/docs/pricing" target="_blank" rel="noopener noreferrer">OpenAI API pricing</a> for provider rates.
 			</p>
 		</div>
 	</Reveal>

@@ -54,6 +54,48 @@ describe('subscription period entitlements', () => {
 		expect(period?.consumedCredits).toBe(2);
 	});
 
+	test('keeps a paid subscription allowance available with no purchased credits', async () => {
+		const now = Date.now();
+		const periodStart = new Date(now - 86_400_000).toISOString();
+		const periodEnd = new Date(now + 86_400_000).toISOString();
+		await testDb().db.update(organizations).set({ plan: 'hosted', creditsRemaining: null, stripeSubscriptionId: 'sub-1', stripeSubscriptionStatus: 'active', stripeSubscriptionPeriodEnd: periodEnd }).where(eq(organizations.id, 'org-1'));
+		await testDb().db.insert(stripeSubscriptionPeriods).values({ orgId: 'org-1', subscriptionId: 'sub-1', invoiceId: 'in-1', periodKey: periodStart.slice(0, 7), periodStart, periodEnd, includedCredits: 100, consumedCredits: 0, status: 'paid' });
+
+		expect(await getCredits('org-1')).toBe(100);
+		expect(await consumeCredit(testDb().db, 'org-1', 'comment-1')).toBe(true);
+		expect(await getCredits('org-1')).toBe(99);
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.creditsRemaining).toBeNull();
+	});
+
+	test.each(['expired', 'refunded'] as const)('does not spend an %s subscription allowance', async state => {
+		const now = Date.now();
+		const periodStart = new Date(now - 86_400_000).toISOString();
+		const periodEnd = new Date(now + (state === 'expired' ? -1000 : 86_400_000)).toISOString();
+		await testDb().db.update(organizations).set({ plan: 'hosted', creditsRemaining: 0, stripeSubscriptionId: 'sub-1', stripeSubscriptionStatus: 'active', stripeSubscriptionPeriodEnd: periodEnd }).where(eq(organizations.id, 'org-1'));
+		await testDb().db.insert(stripeSubscriptionPeriods).values({ orgId: 'org-1', subscriptionId: 'sub-1', invoiceId: 'in-1', periodKey: periodStart.slice(0, 7), periodStart, periodEnd, includedCredits: 100, consumedCredits: 0, status: state === 'refunded' ? 'refunded' : 'paid' });
+		expect(await getCredits('org-1')).toBe(0);
+		expect(await consumeCredit(testDb().db, 'org-1', 'comment-1')).toBe(false);
+		expect((await testDb().db.select().from(stripeSubscriptionPeriods).get())?.consumedCredits).toBe(0);
+	});
+
+	test('unused allowance from the previous period does not carry into the current period', async () => {
+		const now = Date.now();
+		const boundary = new Date(now - 1000).toISOString();
+		const periodEnd = new Date(now + 86_400_000).toISOString();
+		await testDb().db.update(organizations).set({ plan: 'hosted', creditsRemaining: 0, stripeSubscriptionId: 'sub-1', stripeSubscriptionStatus: 'active', stripeSubscriptionPeriodEnd: periodEnd }).where(eq(organizations.id, 'org-1'));
+		await testDb().db.insert(stripeSubscriptionPeriods).values([
+			{ orgId: 'org-1', subscriptionId: 'sub-1', invoiceId: 'in-old', periodKey: 'old', periodStart: new Date(now - 86_400_000).toISOString(), periodEnd: boundary, includedCredits: 100, consumedCredits: 10, status: 'paid' },
+			{ orgId: 'org-1', subscriptionId: 'sub-1', invoiceId: 'in-new', periodKey: 'new', periodStart: boundary, periodEnd, includedCredits: 100, consumedCredits: 2, status: 'paid' }
+		]);
+		expect(await getCredits('org-1')).toBe(98);
+		expect(await consumeCredit(testDb().db, 'org-1', 'comment-1')).toBe(true);
+		expect(await getCredits('org-1')).toBe(97);
+		const periods = await testDb().db.select().from(stripeSubscriptionPeriods).all();
+		expect(periods.find(row => row.invoiceId === 'in-old')?.consumedCredits).toBe(10);
+		expect(periods.find(row => row.invoiceId === 'in-new')?.consumedCredits).toBe(3);
+	});
+
 	test('a refund matches a period that stored only the payment intent', async () => {
 		// invoicePaymentReferences accepts either ref alone — a period row can
 		// carry only payment_intent_id. The refund event arrives with BOTH refs;

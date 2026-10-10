@@ -1,6 +1,6 @@
 <!--
 	The lifetime deal: hosted forever for one $49 payment, capped at the
-	first 1,000 users. AI scoring runs on the buyer's own OpenAI API key
+	1,000 lifetime places. AI scoring runs on the buyer's own OpenAI API key
 	(Terms §6.1(c)) — the card must say so before purchase. Card markup
 	and styles live in PlanCard.svelte.
 -->
@@ -14,17 +14,16 @@
 </script>
 
 <PlanCard
-	stamp="First 1000 users"
+	stamp="1,000 lifetime places"
 	mint
 	kicker="Lifetime"
 	price="$49"
 	priceNote="once, forever"
-	bestFor={detailed ? 'Best for: early believers.' : ''}
+	bestFor={detailed ? 'Best for creators who want hosted access without a monthly subscription and can provide an OpenAI key.' : ''}
 	ticks={detailed ? TICKS_LIFETIME_DETAILED : TICKS_LIFETIME}
 >
 	{#snippet body()}
-		Hosted forever for one payment. Unlimited comments, no meter — AI scoring runs on
-		your own OpenAI API key, which you provide after purchase.
+		One $49 payment for hosted Moderaty and unlimited moderated comments. AI scoring requires your own OpenAI API key, which you must provide and keep valid. OpenAI charges for that usage separately.
 	{/snippet}
 	{#snippet cta()}
 		<a href={LOGIN_URL} data-moderaty-event="connect_click" data-moderaty-placement="plan_lifetime" class="btn-press primary-btn">Connect YouTube channel</a>

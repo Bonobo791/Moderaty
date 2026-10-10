@@ -24,9 +24,9 @@ test.each([
 	expect(description).toContain('PolyForm Shield');
 	expect(description).toMatch(/costs \$0 from Moderaty/i);
 	expect(description).toMatch(/infrastructure and OpenAI charges are separate/i);
-	expect(description).toMatch(/first 1,000 purchases/i);
+	expect(description).toMatch(/1,000 lifetime places/i);
 	if (surface === 'search') {
-		expect(description).toContain('500 or 2,000 credits');
+		expect(description).toContain('500 credits for $20.40 or 2,000 for $64.65');
 	}
 });
 

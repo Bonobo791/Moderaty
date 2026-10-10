@@ -1,6 +1,6 @@
 <!--
 	The lifetime deal: hosted forever for one $49 payment, capped at the
-	first 1,000 purchases. AI scoring runs on the buyer's own OpenAI API key
+	1,000 lifetime places. AI scoring runs on the buyer's own OpenAI API key
 	(Terms §6.1(c)) — the card must say so before purchase. Card markup
 	and styles live in PlanCard.svelte.
 -->
@@ -14,7 +14,7 @@
 </script>
 
 <PlanCard
-	stamp="First 1,000 purchases"
+	stamp="1,000 lifetime places"
 	mint
 	kicker="Lifetime"
 	price="$49"

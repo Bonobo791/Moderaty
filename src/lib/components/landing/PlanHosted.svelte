@@ -7,6 +7,7 @@
 -->
 
 <script lang="ts">
+	import { TOP_UP_BUNDLES_COPY } from '$lib/landing/plans';
 	import PlanCard from './PlanCard.svelte';
 	import { LOGIN_URL } from '$lib/landing/links';
 	import { TICKS_HOSTED, TICKS_HOSTED_DETAILED } from '$lib/landing/plans';
@@ -23,7 +24,7 @@
 	ticks={detailed ? TICKS_HOSTED_DETAILED : TICKS_HOSTED}
 >
 	{#snippet body()}
-		Moderaty runs the service and supplies the AI key. Each paid month includes 100 credits shared by moderation scoring and enabled feedback digests. Buy more only when needed: 500 credits for $20.40 or 2,000 for $64.65.
+		Moderaty runs the service and supplies the AI key. Each paid month includes 100 credits shared by moderation scoring and enabled feedback digests. Buy more only when needed: {TOP_UP_BUNDLES_COPY}.
 	{/snippet}
 	{#snippet cta()}
 		<a href={LOGIN_URL} data-moderaty-event="connect_click" data-moderaty-placement="plan_hosted" class="btn-press primary-btn">Connect YouTube channel</a>

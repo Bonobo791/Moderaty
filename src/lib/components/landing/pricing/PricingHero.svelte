@@ -18,7 +18,7 @@
 				</div>
 				<p class="qa-body">
 					Self-hosted Moderaty costs $0 from Moderaty under the source-available PolyForm Shield 1.0.0 license. You provide the infrastructure and OpenAI key. Provider and OpenAI charges vary by setup and use.
-					Hosted renews at $5 a month for 100 AI classifications shared by moderation scoring and feedback digests. The first 1,000 purchases can get hosted lifetime access for $49 once, with AI scoring on your own OpenAI key.
+					Hosted renews at $5 a month for 100 AI classifications shared by moderation scoring and feedback digests. There are 1,000 lifetime places at $49 once for hosted access, with AI scoring on your own OpenAI key.
 				</p>
 			</div>
 		</div>

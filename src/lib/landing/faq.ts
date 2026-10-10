@@ -7,7 +7,7 @@ export type FaqEntry = { q: string; a: string };
 const FAQ_COPY: [question: string, answer: string][] = [
 	[
 		'What is Moderaty?',
-		"Moderaty checks published top-level comments on connected, active YouTube channels in background batches. Protected handles skip rules and AI. Your rules run before AI screening and scoring; uncertain results and scoring failures go to your review queue. If a check runs out of time, unfinished comments retry on a later check instead. Replies and a separate sweep of YouTube's held-for-review or spam queues are outside the current scanning scope. Live chat is also outside this scope. It's source-available and free to self-host under PolyForm Shield License 1.0.0, subject to its commercial restrictions."
+		"Moderaty checks published top-level comments on connected, active YouTube channels in background batches. Protected handles skip rules and AI. Your rules run before AI screening and scoring; uncertain results and scoring failures go to your review queue. If a check runs out of time, unfinished comments retry on a later check instead. Replies and a separate sweep of YouTube's held-for-review or spam queues are outside the current scanning scope. Live chat is also outside this scope. It's source-available and costs $0 from Moderaty to self-host under PolyForm Shield License 1.0.0, subject to its commercial restrictions."
 	],
 	[
 		'Will Moderaty ban my real fans?',
@@ -39,7 +39,7 @@ const FAQ_COPY: [question: string, answer: string][] = [
 	],
 	[
 		'Is Moderaty really free?',
-		'Self-hosted, yes: source-available and free to self-host under the PolyForm Shield license, forever. If we host it for you, that is $5 a month with 100 comments included, or $49 once for lifetime if you are among the first 1,000 users.'
+		'Self-hosted Moderaty costs $0 from Moderaty under the source-available PolyForm Shield license; infrastructure and OpenAI charges are separate. Hosted is $5 a month with 100 AI classifications shared by moderation scoring and enabled feedback digests, or $49 once for one of 1,000 lifetime places, using your own OpenAI key.'
 	],
 	[
 		'How is Moderaty different from CommentShark or YouTube Studio?',

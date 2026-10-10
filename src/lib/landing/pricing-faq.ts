@@ -1,3 +1,7 @@
+import { expectedBundlePriceCents } from '$lib/credit-pricing';
+import { MONTHLY_PLAN_USD } from './cost';
+import { TOP_UP_BUNDLES_COPY } from './plans';
+
 /**
  * The /pricing FAQ. Single source: PricingFaq.svelte renders it and
  * pricing/+page.svelte builds the FAQPage structured data from it.
@@ -9,11 +13,11 @@ export const PRICING_FAQ_ENTRIES: { q: string; a: string }[] = [
 	},
 	{
 		q: 'What is the $49 lifetime deal?',
-		a: 'The offer is limited to the first 1,000 purchases: one $49 payment for hosted Moderaty forever and unlimited moderated comments. You must provide and keep valid your own OpenAI API key for AI scoring, including feedback digests. OpenAI bills your account separately.'
+		a: 'The offer is limited to 1,000 lifetime places: one $49 payment for hosted Moderaty forever and unlimited moderated comments. You must provide and keep valid your own OpenAI API key for AI scoring, including feedback digests. OpenAI bills your account separately.'
 	},
 	{
 		q: 'What does BYOK mean?',
-		a: 'Bring your own key. Self-hosted Moderaty uses the OpenAI key configured on your infrastructure. The lifetime plan requires an organization owner to provide a valid OpenAI API key for scoring. OpenAI bills those API requests separately. The hosted monthly plan uses Moderaty’s key.'
+		a: 'Bring your own key. Self-hosted Moderaty uses the OpenAI key configured on your infrastructure. The lifetime plan requires an organization owner to provide a valid OpenAI API key for scoring. OpenAI bills those API requests separately. On hosted lifetime plans, your key is stored encrypted and processed to validate the key and score comments. The hosted monthly plan uses Moderaty’s key.'
 	},
 	{
 		q: 'Why is self-hosting free?',
@@ -21,7 +25,7 @@ export const PRICING_FAQ_ENTRIES: { q: string; a: string }[] = [
 	},
 	{
 		q: 'What happens when my 100 AI classifications run out?',
-		a: 'You can buy 500 credits for $20.40 or 2,000 for $64.65. One credit covers one AI moderation score; a feedback digest classification uses another. Rule and protected-handle decisions use no moderation credit, but digest classification of those comments still uses one. A requested history scan can charge again; retrying the same scan does not. For example, with the full 100-credit allowance and no purchased credits, 100 moderation scores plus 100 digest classifications need one 500-credit bundle: $25.40 including the subscription, with 400 purchased credits left. Purchased credits stay on your balance. The Usage page shows your balance; automatic top-up uses your selected bundle and threshold.'
+		a: `You can buy ${TOP_UP_BUNDLES_COPY}. One credit covers one AI moderation score; a feedback digest classification uses another. Rule and protected-handle decisions use no moderation credit, but digest classification of those comments still uses one. A requested history scan can charge again; retrying the same scan does not. For example, with the full 100-credit allowance and no purchased credits, 100 moderation scores plus 100 digest classifications need one 500-credit bundle: $${(MONTHLY_PLAN_USD + expectedBundlePriceCents(500) / 100).toFixed(2)} including the subscription, with 400 purchased credits left. Purchased credits stay on your balance. The Usage page shows your balance; automatic top-up uses your selected bundle and threshold.`
 	},
 	{
 		q: 'Can I pay in Brazilian reais?',
@@ -29,7 +33,7 @@ export const PRICING_FAQ_ENTRIES: { q: string; a: string }[] = [
 	},
 	{
 		q: 'Which one should I pick?',
-		a: 'Choose hosted monthly if you want Moderaty to run the service and handle the AI key. Choose lifetime if you want hosted access without a monthly subscription and can provide an OpenAI key. Self-host if you can operate the infrastructure and want to manage your own key and deployment.'
+		a: 'Choose hosted monthly if you want Moderaty to run the service and handle the AI key. Choose lifetime if you want hosted access without a monthly subscription and can provide an OpenAI key. Self-host if you can operate the infrastructure and want to manage your own key and deployment. Contact us for custom or volume pricing.'
 	},
 	{
 		q: 'Can I get a refund?',

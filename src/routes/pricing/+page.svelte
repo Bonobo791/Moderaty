@@ -11,6 +11,7 @@
 	import FinalCta from '$lib/components/landing/FinalCta.svelte';
 	import Footer from '$lib/components/landing/Footer.svelte';
 	import { PRICING_FAQ_ENTRIES } from '$lib/landing/pricing-faq';
+	import { TOP_UP_BUNDLES_COPY } from '$lib/landing/plans';
 	import { jsonLd } from '$lib/landing/json-ld';
 
 	const faqPage = {
@@ -28,13 +29,13 @@
 	<title>Pricing | Moderaty</title>
 	<meta
 		name="description"
-		content="Self-hosted Moderaty costs $0 from Moderaty under the source-available PolyForm Shield license; infrastructure and OpenAI charges are separate. Hosted: $5 a month for 100 AI classifications shared by moderation scoring and feedback digests; top-ups: 500 or 2,000 credits for $20.40 or $64.65. First 1,000 purchases: $49 once for lifetime hosting, with your own OpenAI key."
+		content={`Self-hosted Moderaty costs $0 from Moderaty under the source-available PolyForm Shield license; infrastructure and OpenAI charges are separate. Hosted: $5 a month for 100 AI classifications shared by moderation scoring and feedback digests; top-ups: ${TOP_UP_BUNDLES_COPY}. 1,000 lifetime places: $49 once for lifetime hosting, with your own OpenAI key.`}
 	/>
 	<meta property="og:type" content="website" />
 	<meta property="og:title" content="Protection, priced like a utility." />
 	<meta
 		property="og:description"
-		content="Self-hosted Moderaty costs $0 from Moderaty under the source-available PolyForm Shield license; infrastructure and OpenAI charges are separate. Hosted: $5 a month for 100 AI classifications shared by moderation scoring and feedback digests, or $49 once for lifetime hosting (first 1,000 purchases, your own OpenAI key)."
+		content="Self-hosted Moderaty costs $0 from Moderaty under the source-available PolyForm Shield license; infrastructure and OpenAI charges are separate. Hosted: $5 a month for 100 AI classifications shared by moderation scoring and feedback digests, or $49 once for lifetime hosting (1,000 lifetime places, your own OpenAI key)."
 	/>
 	{@html jsonLd(faqPage)}
 </svelte:head>

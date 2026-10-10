@@ -211,9 +211,9 @@ it('preserves the approved hosted and lifetime offers with BYOK disclosure', () 
 	expect(subscription).toContain('$5 a month');
 	expect(subscription).toContain('100 AI classifications');
 	const lifetime = PRICING_FAQ_ENTRIES.find(({ q }) => q === 'What is the $49 lifetime deal?')?.a;
-		expect(lifetime).toContain('first 1,000 purchases');
+	expect(lifetime).toContain('1,000 lifetime places');
 	expect(lifetime).toContain('one $49 payment');
-		expect(lifetime).toContain('hosted Moderaty forever');
+	expect(lifetime).toContain('hosted Moderaty forever');
 	expect(lifetime).toContain('your own OpenAI API key');
 });
 

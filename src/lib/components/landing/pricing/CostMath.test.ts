@@ -6,6 +6,7 @@ import { ModuleKind, transpileModule } from 'typescript';
 import { expect, it } from 'vitest';
 import Reveal from '../Reveal.svelte';
 import type CostMath from './CostMath.svelte';
+import * as plans from '$lib/landing/plans';
 import * as cost from '$lib/landing/cost';
 
 const source = readFileSync(new URL('./CostMath.svelte', import.meta.url), 'utf8');
@@ -34,7 +35,8 @@ function renderEstimate(moderation: number, digest: number) {
 		'svelte/internal/server': createRequire(import.meta.url)('svelte/internal/server'),
 		'$app/state': { page: { data: { locale: 'en' } } },
 		'../Reveal.svelte': { default: Reveal },
-		'$lib/landing/cost': cost
+		'$lib/landing/cost': cost,
+		'$lib/landing/plans': plans
 	};
 	const exports: { default?: typeof CostMath } = {};
 	new Function('require', 'exports', outputText)((id: string) => {

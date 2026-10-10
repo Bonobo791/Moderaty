@@ -54,6 +54,20 @@ describe('subscription period entitlements', () => {
 		expect(period?.consumedCredits).toBe(2);
 	});
 
+	test('keeps a paid subscription allowance available with no purchased credits', async () => {
+		const now = Date.now();
+		const periodStart = new Date(now - 86_400_000).toISOString();
+		const periodEnd = new Date(now + 86_400_000).toISOString();
+		await testDb().db.update(organizations).set({ plan: 'hosted', creditsRemaining: null, stripeSubscriptionId: 'sub-1', stripeSubscriptionStatus: 'active', stripeSubscriptionPeriodEnd: periodEnd }).where(eq(organizations.id, 'org-1'));
+		await testDb().db.insert(stripeSubscriptionPeriods).values({ orgId: 'org-1', subscriptionId: 'sub-1', invoiceId: 'in-1', periodKey: periodStart.slice(0, 7), periodStart, periodEnd, includedCredits: 100, consumedCredits: 0, status: 'paid' });
+
+		expect(await getCredits('org-1')).toBe(100);
+		expect(await consumeCredit(testDb().db, 'org-1', 'comment-1')).toBe(true);
+		expect(await getCredits('org-1')).toBe(99);
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.creditsRemaining).toBeNull();
+	});
+
 	test('a refund matches a period that stored only the payment intent', async () => {
 		// invoicePaymentReferences accepts either ref alone — a period row can
 		// carry only payment_intent_id. The refund event arrives with BOTH refs;

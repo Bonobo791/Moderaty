@@ -22,8 +22,8 @@ export const TICKS_SELF_HOSTED_DETAILED = [
 ];
 
 export const TICKS_HOSTED = [
-	'Auto-renews monthly, 100 comments included',
-	'Top-ups in bundles of 500 or 2,000 comments, up to 35% off',
+	'Auto-renews monthly, 100 AI classifications included',
+	'500 credits for $20.40 or 2,000 for $64.65',
 	'Automatic top-up is opt-in',
 	'Same rules, same model, same audit log'
 ];
@@ -32,7 +32,8 @@ export const TICKS_HOSTED_DETAILED = [
 	'Everything in self-hosted',
 	'We run it, patch it, and keep it awake',
 	'One-click YouTube OAuth',
-	'100 comments a month; top up with comment bundles when you run out, up to 35% off',
+	'100 AI classifications per paid month, shared by moderation scoring and enabled feedback digests',
+	'500 credits for $20.40 or 2,000 for $64.65 when you need more',
 	'Automatic top-up is opt-in, off by default'
 ];
 
@@ -40,7 +41,7 @@ export const TICKS_LIFETIME = [
 	'One payment, hosted forever',
 	'AI scoring on your own OpenAI API key',
 	'Unlimited moderated comments',
-	'Only the first 1,000 users'
+	'Limited to the first 1,000 purchases'
 ];
 
 export const TICKS_LIFETIME_DETAILED = [
@@ -48,5 +49,5 @@ export const TICKS_LIFETIME_DETAILED = [
 	'We run it, patch it, and keep it awake, forever',
 	'AI scoring runs on your own OpenAI API key (Terms §6.1(c))',
 	'Unlimited moderated comments, no meter',
-	'Capped at the first 1,000 users, then it is gone'
+	'Limited to the first 1,000 purchases'
 ];

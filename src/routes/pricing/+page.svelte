@@ -7,7 +7,6 @@
 	import PricingHero from '$lib/components/landing/pricing/PricingHero.svelte';
 	import PricingPlans from '$lib/components/landing/pricing/PricingPlans.svelte';
 	import CostMath from '$lib/components/landing/pricing/CostMath.svelte';
-	import WhyFree from '$lib/components/landing/pricing/WhyFree.svelte';
 	import PricingFaq from '$lib/components/landing/pricing/PricingFaq.svelte';
 	import FinalCta from '$lib/components/landing/FinalCta.svelte';
 	import Footer from '$lib/components/landing/Footer.svelte';
@@ -29,13 +28,13 @@
 	<title>Pricing | Moderaty</title>
 	<meta
 		name="description"
-		content="Free to self-host under PolyForm Shield; source-available, bring your own key. Hosted: $5 a month for 100 AI classifications shared by moderation scoring and feedback digests, auto-renewed, top-ups in bundles of 500 or 2,000 credits. First 1,000 users: $49 once for lifetime hosting, scoring on your own OpenAI key."
+		content="Self-hosted Moderaty costs $0 from Moderaty under the source-available PolyForm Shield license; infrastructure and OpenAI charges are separate. Hosted: $5 a month for 100 AI classifications shared by moderation scoring and feedback digests; top-ups: 500 or 2,000 credits for $20.40 or $64.65. First 1,000 purchases: $49 once for lifetime hosting, with your own OpenAI key."
 	/>
 	<meta property="og:type" content="website" />
 	<meta property="og:title" content="Protection, priced like a utility." />
 	<meta
 		property="og:description"
-		content="Source-available under PolyForm Shield, free to self-host. Hosted: $5 a month for 100 AI classifications shared by moderation scoring and feedback digests, or $49 once for lifetime hosting (first 1,000 users, your own OpenAI key)."
+		content="Self-hosted Moderaty costs $0 from Moderaty under the source-available PolyForm Shield license; infrastructure and OpenAI charges are separate. Hosted: $5 a month for 100 AI classifications shared by moderation scoring and feedback digests, or $49 once for lifetime hosting (first 1,000 purchases, your own OpenAI key)."
 	/>
 	{@html jsonLd(faqPage)}
 </svelte:head>
@@ -45,7 +44,6 @@
 	<PricingHero />
 	<PricingPlans />
 	<CostMath />
-	<WhyFree />
 	<PricingFaq />
 	<FinalCta />
 </main>

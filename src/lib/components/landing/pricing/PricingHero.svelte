@@ -17,11 +17,8 @@
 					<span class="qa-label">Quick answer</span>
 				</div>
 				<p class="qa-body">
-					Moderaty is source-available under PolyForm Shield 1.0.0 and free to self-host. Bring your own OpenAI key
-					for the AI scoring.
-					Hosted costs $5 a month for 100 AI-scored comments, auto-renewed, with top-ups from
-					5¢ a comment when you run out. The first 1,000 users can instead pay $49 once for lifetime hosting —
-					scoring on your own OpenAI key.
+					Self-hosted Moderaty costs $0 from Moderaty under the source-available PolyForm Shield 1.0.0 license. You provide the infrastructure and OpenAI key. Provider and OpenAI charges vary by setup and use.
+					Hosted renews at $5 a month for 100 AI classifications shared by moderation scoring and feedback digests. The first 1,000 purchases can get hosted lifetime access for $49 once, with AI scoring on your own OpenAI key.
 				</p>
 			</div>
 		</div>
@@ -29,7 +26,7 @@
 	<Reveal delay={0.08}>
 		<h1 class="hero-title">Protection, priced like a <span class="marker">utility.</span></h1>
 		<p class="hero-sub">
-			The software is free. The AI might as well be. What you can buy is not having to run it.
+			Choose managed hosting, or run Moderaty on infrastructure you operate.
 		</p>
 	</Reveal>
 </section>

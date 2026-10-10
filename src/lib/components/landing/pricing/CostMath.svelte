@@ -105,7 +105,7 @@
 			<p class="calculator-assumptions">
 				This calculator covers the recurring hosted plan. The lifetime plan is $49 once with
 				BYOK; self-hosting has no Moderaty subscription. Your OpenAI charges are separate and
-				outside this estimate, as are self-hosting infrastructure costs.
+				outside this estimate, as are self-hosting infrastructure costs. Read the <a href="/terms#s6">plan and billing terms</a> or check <a href="https://developers.openai.com/api/docs/pricing" target="_blank" rel="noopener noreferrer">OpenAI API pricing</a> for provider rates.
 			</p>
 		</div>
 	</Reveal>
